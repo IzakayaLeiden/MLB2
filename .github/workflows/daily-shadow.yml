@@ -1,4 +1,5 @@
 name: Daily shadow forecast
+run-name: Daily shadow forecast
 
 on:
   schedule:
