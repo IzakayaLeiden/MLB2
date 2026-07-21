@@ -69,6 +69,7 @@ def build_dataset(
     start_date: str,
     end_date: str,
     output_dir: str | Path,
+    cache_dir: str | Path | None = None,
     history_start_date: str | None = None,
     chunk_days: int = 7,
     refresh: bool = False,
@@ -78,7 +79,7 @@ def build_dataset(
     output_start, output_end, history_start, history_policy = _parse_build_dates(start_date, end_date, history_start_date)
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    raw_dir = root / "raw"
+    raw_dir = Path(cache_dir) if cache_dir is not None else root / "raw"
     processed_dir = root / "processed"
     feature_dir = root / "features"
     report_dir = root / "reports"
@@ -175,7 +176,7 @@ def build_dataset(
             "generated_at_utc": datetime.now(UTC).isoformat(),
             "source": {
                 **manifest_base["source"],
-                "raw_files": [str(item.cache_path.relative_to(root)) for item in cached_payloads],
+                "raw_files": [str(item.cache_path) for item in cached_payloads],
                 "requests": [
                     {
                         "start_date": item.start_date,
@@ -222,4 +223,3 @@ def build_dataset(
         }
         write_json(root / "manifest.json", failure_manifest)
         raise
-

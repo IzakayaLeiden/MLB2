@@ -1,6 +1,20 @@
-# MLB 경기 전 예측 데이터셋
+# MLB2 검증형 공개 베타
 
-MLB 승패 예측 앱의 첫 번째 마일스톤입니다. MLB Stats API 일정 응답을 원본 그대로 캐시하고, 완료된 정규시즌 경기를 한 경기당 한 행으로 정규화한 뒤, **경기 당일 결과를 전혀 사용하지 않는** 경기 전 피처를 생성합니다.
+MLB 정규시즌 홈 승리 확률을 경기 전 데이터만으로 생성하고, 역사 검증과 미래 섀도 검증 상태를 함께 공개하기 위한 프로젝트입니다. MLB Stats API 일정 응답을 원본 그대로 캐시하고, 완료 경기와 예정·연기·취소 경기를 분리해 정규화하며, **경기 당일 결과를 전혀 사용하지 않는** 피처를 생성합니다. 배당·베팅 추천·ROI·수익성 및 포스트시즌은 범위에서 제외합니다.
+
+## 현재 검증 상태 (2026-07-21)
+
+- 2018-03-29~2026-07-20 완료 정규시즌 19,379경기 검증 완료(2020 단축 시즌 포함)
+- 2022~2024 워크포워드 선택: `logistic_platt:l2=0.01`
+- 봉인된 2025 홀드아웃 2,426경기 단회 평가 통과
+  - 선택 모델: Log Loss `0.68191`, Brier `0.24450`
+  - Elo: Log Loss `0.68760`, Brier `0.24712`
+  - 상수 기준선: Log Loss `0.68985`, Brier `0.24835`
+- `model-v1`은 2026-07-20까지의 데이터로 동결됐으며 섀도 기간에는 재학습하지 않음
+- 역사 게이트는 통과했지만 미래 공개 게이트는 아직 `false`
+  - 30일 경과 및 300경기 채점, 95% 커버리지 등 실제 미래 검증이 남아 있음
+
+동결 모델과 검증 요약은 `artifacts/model-v1/`에 있습니다. 생성 데이터와 일별 섀도 자산은 Git에 커밋하지 않습니다.
 
 ## 현재 범위
 
@@ -23,6 +37,37 @@ MLB 승패 예측 앱의 첫 번째 마일스톤입니다. MLB Stats API 일정 
 $env:PYTHONPATH = "src"
 python -m mlb_predictor build --start-date 2025-03-27 --end-date 2025-04-05 --output-dir data\sample
 ```
+
+다년 검증, 당일 예측, 결과 연결, 공개 게이트는 다음 CLI를 사용합니다.
+
+```powershell
+python -m mlb_predictor backtest --features data\multi-year\features\pregame_features.parquet --output-dir data\model-v1 --cutoff-date 2026-07-20
+python -m mlb_predictor forecast --history-games data\runtime\processed\history_games.parquet --model artifacts\model-v1\model-v1.json --target-date 2026-07-21 --output-dir data\shadow
+python -m mlb_predictor grade --feed data\shadow\prediction.json --completed-games data\runtime\processed\games.parquet --output data\shadow\grade.json
+python -m mlb_predictor gate --feeds-dir data\shadow --grades-dir data\shadow --model artifacts\model-v1\model-v1.json --as-of-date 2026-08-21 --output data\shadow\status.json
+```
+
+`backtest`의 2025 홀드아웃은 상태 파일로 단회 사용을 강제합니다. 이미 사용된 출력 디렉터리에 다시 실행하면 실패합니다.
+
+## Sites 앱
+
+`sites-app/`은 공식 Sites vinext worker starter 기반 React·TypeScript 앱입니다. GitHub Pages의 `prediction-feed-v1`을 서버 경로에서 검증하며, 피드가 26시간 이상 오래됐거나 날짜·스키마·품질 검사가 실패하면 확률을 숨기고 `예측 사용 불가`를 표시합니다.
+
+```powershell
+cd sites-app
+npm ci
+npm run typecheck
+npm run lint
+npm test
+```
+
+호스팅 값 `PAGES_FEED_URL`은 Sites 환경 변수로 설정합니다. `SITE_DEMO_FEED=1`은 로컬 시각 QA 전용이며 배포 환경에서는 사용하지 않습니다.
+
+## 자동화
+
+- `.github/workflows/daily-shadow.yml`: 매일 `08:17 America/New_York`, 당일 봉인·전일 채점·draft release 업로드·익명 다운로드 차단 확인
+- `.github/workflows/pages.yml`: 공개 게이트 통과 시에만 `latest.json`, 날짜별 아카이브, 모델 요약, 상태를 GitHub Pages에 배포
+- 게이트 실패나 Pages 작업 실패 시 마지막 정상 공개 피드를 교체하지 않음
 
 패키지로 설치한 뒤에는 다음 명령도 사용할 수 있습니다.
 

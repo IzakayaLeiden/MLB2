@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from mlb_predictor.features import FeatureConfig, build_pregame_features
+from mlb_predictor.features import FeatureConfig, build_forecast_features, build_pregame_features
 
 
 def by_id(rows):
@@ -101,3 +101,28 @@ def test_new_season_resets_form_and_regresses_elo(game_factory) -> None:
     assert rows[701]["home_elo_pregame"] == pytest.approx(1507.5)
     assert rows[701]["away_elo_pregame"] == pytest.approx(1492.5)
 
+
+def test_forecast_features_use_only_completed_prior_dates_and_have_no_target(game_factory) -> None:
+    history = [game_factory(800, "2025-04-01", 1, 2, 5, 3)]
+    scheduled = game_factory(801, "2025-04-02", 2, 1, 1, 0)
+    for key in ("home_score", "away_score", "home_win", "home_is_winner", "away_is_winner"):
+        scheduled.pop(key)
+    scheduled["status"] = "Preview"
+
+    row = build_forecast_features(history, [scheduled])[0]
+
+    assert "home_win" not in row
+    assert row["away_history_through_date"] == "2025-04-01"
+    assert row["home_history_through_date"] == "2025-04-01"
+    assert row["away_recent_win_pct"] == 1.0
+    assert row["home_recent_win_pct"] == 0.0
+
+
+def test_forecast_rejects_same_day_completed_history(game_factory) -> None:
+    history = [game_factory(810, "2025-04-02", 1, 2, 5, 3)]
+    scheduled = game_factory(811, "2025-04-02", 3, 4, 1, 0)
+    for key in ("home_score", "away_score", "home_win"):
+        scheduled.pop(key)
+
+    with pytest.raises(ValueError, match="늦어야"):
+        build_forecast_features(history, [scheduled])

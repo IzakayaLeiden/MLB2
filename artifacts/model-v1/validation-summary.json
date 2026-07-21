@@ -1,0 +1,39 @@
+{
+  "schema_version": "model-validation-summary-v1",
+  "created_at_utc": "2026-07-21T12:50:47.947367Z",
+  "data": {
+    "start_date": "2018-03-29",
+    "cutoff_date": "2026-07-20",
+    "completed_regular_season_games": 19379,
+    "distinct_teams": 30,
+    "quality_gate_passed": true,
+    "critical_errors": 0,
+    "high_errors": 0,
+    "probable_pitcher_missing_rows": 25
+  },
+  "selection": {
+    "seasons": [2022, 2023, 2024],
+    "candidate": "logistic_platt:l2=0.01",
+    "log_loss": 0.6798511991607653,
+    "brier_score": 0.24341276558324523
+  },
+  "sealed_holdout": {
+    "season": 2025,
+    "rows": 2426,
+    "usage_count": 1,
+    "passed": true,
+    "constant": {"log_loss": 0.689852642768415, "brier_score": 0.2483541650553897},
+    "elo": {"log_loss": 0.6876042888314139, "brier_score": 0.24711696596665428},
+    "selected": {"log_loss": 0.6819105272951423, "brier_score": 0.24449514725043098}
+  },
+  "model": {
+    "version": "model-v1",
+    "sha256": "905a6f001a2f03649cba49027e00ada38c5b3c9bd29e008c953a7c182494bf21",
+    "frozen": true,
+    "retraining_during_shadow": false
+  },
+  "public_gate": {
+    "passed": false,
+    "reason": "30일 및 300경기 미래 섀도 검증 미충족"
+  }
+}

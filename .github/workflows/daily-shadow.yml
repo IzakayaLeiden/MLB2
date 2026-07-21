@@ -1,0 +1,94 @@
+name: Daily shadow forecast
+
+on:
+  schedule:
+    - cron: "17 8 * * *"
+      timezone: "America/New_York"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-shadow
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHADOW_TAG: shadow-v1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -e .
+      - uses: actions/cache@v4
+        with:
+          path: data/raw-cache
+          key: mlb-schedule-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            mlb-schedule-${{ runner.os }}-
+      - name: Resolve ET dates
+        id: dates
+        shell: bash
+        run: |
+          echo "target=$(TZ=America/New_York date +%F)" >> "$GITHUB_OUTPUT"
+          echo "yesterday=$(TZ=America/New_York date -d yesterday +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore draft release assets
+        shell: bash
+        run: |
+          mkdir -p data/shadow
+          gh release view "$SHADOW_TAG" >/dev/null 2>&1 || gh release create "$SHADOW_TAG" --draft --title "MLB2 shadow assets" --notes "Immutable pre-public shadow forecasts and grades."
+          gh release download "$SHADOW_TAG" --dir data/shadow || true
+      - name: Build completed history through yesterday
+        run: >-
+          python -m mlb_predictor build
+          --start-date 2018-01-01
+          --end-date ${{ steps.dates.outputs.yesterday }}
+          --history-start-date 2018-01-01
+          --chunk-days 31
+          --cache-dir data/raw-cache
+          --output-dir data/runtime
+      - name: Grade yesterday when a sealed feed exists
+        id: grade
+        shell: bash
+        run: |
+          feed=$(find data/shadow -type f -name "prediction-${{ steps.dates.outputs.yesterday }}T*.json" | head -n 1)
+          if [ -n "$feed" ]; then
+            output="data/shadow/grade-${{ steps.dates.outputs.yesterday }}.json"
+            python -m mlb_predictor grade --feed "$feed" --completed-games data/runtime/processed/games.parquet --output "$output" || code=$?
+            if [ "${code:-0}" -gt 2 ]; then exit "$code"; fi
+            gh release upload "$SHADOW_TAG" "$output" --clobber
+          fi
+      - name: Seal today's feed once
+        id: forecast
+        shell: bash
+        run: |
+          compact=${{ steps.dates.outputs.target }}
+          existing=$(find data/shadow -type f -name "prediction-${compact//-/}T*.json" | head -n 1)
+          if [ -n "$existing" ]; then
+            echo "feed=$existing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python -m mlb_predictor forecast --history-games data/runtime/processed/history_games.parquet --model artifacts/model-v1/model-v1.json --target-date "${{ steps.dates.outputs.target }}" --output-dir data/shadow
+          feed=$(find data/shadow -type f -name "prediction-${compact//-/}T*.json" | head -n 1)
+          test -n "$feed"
+          gh release upload "$SHADOW_TAG" "$feed"
+          echo "feed=$feed" >> "$GITHUB_OUTPUT"
+      - name: Verify draft asset is not anonymously downloadable
+        shell: bash
+        run: |
+          asset=$(basename "${{ steps.forecast.outputs.feed }}")
+          status=$(curl -L -s -o /dev/null -w "%{http_code}" "https://github.com/${GITHUB_REPOSITORY}/releases/download/${SHADOW_TAG}/${asset}")
+          test "$status" = "404"
+      - name: Evaluate current public gate
+        shell: bash
+        run: |
+          status="data/shadow/status-${{ steps.dates.outputs.target }}.json"
+          python -m mlb_predictor gate --feeds-dir data/shadow --grades-dir data/shadow --model artifacts/model-v1/model-v1.json --as-of-date "${{ steps.dates.outputs.target }}" --output "$status" || code=$?
+          if [ "${code:-0}" -gt 2 ]; then exit "$code"; fi
+          gh release upload "$SHADOW_TAG" "$status" --clobber

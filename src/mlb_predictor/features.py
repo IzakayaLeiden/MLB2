@@ -82,6 +82,188 @@ def _ordered_games(games: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: (str(row["official_date"]), str(row.get("game_start_utc") or ""), int(row["game_id"])))
 
 
+def _feature_row(
+    game: dict[str, Any],
+    *,
+    season: int,
+    official_date: str,
+    home_state: dict[str, Any],
+    away_state: dict[str, Any],
+    home_elo: float,
+    away_elo: float,
+    config: FeatureConfig,
+    include_target: bool,
+) -> dict[str, Any]:
+    expected_home = _elo_expected(home_elo, away_elo, config.home_field_elo_advantage)
+    row = {
+        "game_id": int(game["game_id"]),
+        "season": season,
+        "official_date": official_date,
+        "game_start_utc": game.get("game_start_utc"),
+        "away_team_id": int(game["away_team_id"]),
+        "away_team_name": game.get("away_team_name"),
+        "away_team_abbreviation": game.get("away_team_abbreviation"),
+        "home_team_id": int(game["home_team_id"]),
+        "home_team_name": game.get("home_team_name"),
+        "home_team_abbreviation": game.get("home_team_abbreviation"),
+        "away_probable_pitcher_id": game.get("away_probable_pitcher_id"),
+        "away_probable_pitcher_name": game.get("away_probable_pitcher_name"),
+        "home_probable_pitcher_id": game.get("home_probable_pitcher_id"),
+        "home_probable_pitcher_name": game.get("home_probable_pitcher_name"),
+        "venue_id": game.get("venue_id"),
+        "venue_name": game.get("venue_name"),
+        "day_night": game.get("day_night"),
+        "double_header": game.get("double_header"),
+        "game_number": game.get("game_number"),
+        "home_elo_pregame": round(home_elo, 6),
+        "away_elo_pregame": round(away_elo, 6),
+        "home_elo_minus_away": round(home_elo - away_elo, 6),
+        "elo_expected_home_win_probability": round(expected_home, 9),
+        "home_games_before": home_state["games_before"],
+        "away_games_before": away_state["games_before"],
+        "home_season_win_pct": round(home_state["season_win_pct"], 9),
+        "away_season_win_pct": round(away_state["season_win_pct"], 9),
+        "season_win_pct_difference": round(home_state["season_win_pct"] - away_state["season_win_pct"], 9),
+        "home_recent_games_count": home_state["recent_games_count"],
+        "away_recent_games_count": away_state["recent_games_count"],
+        "home_recent_win_pct": round(home_state["recent_win_pct"], 9),
+        "away_recent_win_pct": round(away_state["recent_win_pct"], 9),
+        "recent_win_pct_difference": round(home_state["recent_win_pct"] - away_state["recent_win_pct"], 9),
+        "home_recent_runs_scored": round(home_state["recent_runs_scored"], 6),
+        "away_recent_runs_scored": round(away_state["recent_runs_scored"], 6),
+        "home_recent_runs_allowed": round(home_state["recent_runs_allowed"], 6),
+        "away_recent_runs_allowed": round(away_state["recent_runs_allowed"], 6),
+        "recent_run_margin_difference": round(
+            (home_state["recent_runs_scored"] - home_state["recent_runs_allowed"])
+            - (away_state["recent_runs_scored"] - away_state["recent_runs_allowed"]),
+            6,
+        ),
+        "home_rest_days": home_state["rest_days"],
+        "away_rest_days": away_state["rest_days"],
+        "rest_days_difference": home_state["rest_days"] - away_state["rest_days"],
+        "home_has_prior_history": home_state["has_prior_history"],
+        "away_has_prior_history": away_state["has_prior_history"],
+        "home_history_through_date": home_state["history_through_date"],
+        "away_history_through_date": away_state["history_through_date"],
+        "feature_cutoff_policy": "prior_official_date_only",
+        "feature_version": config.feature_version,
+    }
+    if include_target:
+        row["home_win"] = int(game["home_win"])
+    return row
+
+
+class PregameStateCalculator:
+    """완료 경기만 반영하고 임의 날짜의 경기 전 상태를 생성합니다."""
+
+    def __init__(self, config: FeatureConfig | None = None) -> None:
+        self.config = config or FeatureConfig()
+        self.elo: defaultdict[int, float] = defaultdict(lambda: self.config.initial_elo)
+        self.states: dict[int, _TeamState] = {}
+        self.current_season: int | None = None
+        self.last_applied_date: date | None = None
+
+    def _state_for(self, team_id: int) -> _TeamState:
+        if team_id not in self.states:
+            self.states[team_id] = _TeamState(self.config.recent_window)
+        return self.states[team_id]
+
+    def _enter_season(self, season: int) -> None:
+        if self.current_season == season:
+            return
+        if self.current_season is not None:
+            for team_id in list(self.elo.keys()):
+                self.elo[team_id] = self.config.initial_elo + (
+                    self.elo[team_id] - self.config.initial_elo
+                ) * self.config.offseason_elo_carry
+        self.states = {}
+        self.current_season = season
+
+    def snapshot(self, games: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        ordered = _ordered_games(games)
+        if not ordered:
+            return []
+        dates = {str(row["official_date"]) for row in ordered}
+        seasons = {int(row["season"]) for row in ordered}
+        if len(dates) != 1 or len(seasons) != 1:
+            raise ValueError("snapshot은 같은 시즌·공식 날짜의 경기만 받을 수 있습니다.")
+        season = next(iter(seasons))
+        official_date = next(iter(dates))
+        game_date = date.fromisoformat(official_date)
+        if self.last_applied_date is not None and game_date <= self.last_applied_date:
+            raise ValueError("예측 날짜는 마지막 반영 완료 경기 날짜보다 늦어야 합니다.")
+        self._enter_season(season)
+        rows: list[dict[str, Any]] = []
+        for game in ordered:
+            home_id = int(game["home_team_id"])
+            away_id = int(game["away_team_id"])
+            rows.append(
+                _feature_row(
+                    game,
+                    season=season,
+                    official_date=official_date,
+                    home_state=self._state_for(home_id).snapshot(game_date, self.config),
+                    away_state=self._state_for(away_id).snapshot(game_date, self.config),
+                    home_elo=float(self.elo[home_id]),
+                    away_elo=float(self.elo[away_id]),
+                    config=self.config,
+                    include_target=False,
+                )
+            )
+        return rows
+
+    def apply_completed_date(self, games: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        daily_games = _ordered_games(games)
+        if not daily_games:
+            return []
+        dates = {str(row["official_date"]) for row in daily_games}
+        seasons = {int(row["season"]) for row in daily_games}
+        if len(dates) != 1 or len(seasons) != 1:
+            raise ValueError("apply_completed_date는 같은 시즌·공식 날짜의 경기만 받을 수 있습니다.")
+        season = next(iter(seasons))
+        official_date = next(iter(dates))
+        game_date = date.fromisoformat(official_date)
+        if self.last_applied_date is not None and game_date <= self.last_applied_date:
+            raise ValueError("완료 경기는 공식 날짜 오름차순으로 한 번씩만 반영해야 합니다.")
+        self._enter_season(season)
+        rows: list[dict[str, Any]] = []
+        daily_elo_deltas: defaultdict[int, float] = defaultdict(float)
+        for game in daily_games:
+            home_id = int(game["home_team_id"])
+            away_id = int(game["away_team_id"])
+            home_elo = float(self.elo[home_id])
+            away_elo = float(self.elo[away_id])
+            expected_home = _elo_expected(home_elo, away_elo, self.config.home_field_elo_advantage)
+            rows.append(
+                _feature_row(
+                    game,
+                    season=season,
+                    official_date=official_date,
+                    home_state=self._state_for(home_id).snapshot(game_date, self.config),
+                    away_state=self._state_for(away_id).snapshot(game_date, self.config),
+                    home_elo=home_elo,
+                    away_elo=away_elo,
+                    config=self.config,
+                    include_target=True,
+                )
+            )
+            elo_delta = self.config.elo_k_factor * (int(game["home_win"]) - expected_home)
+            daily_elo_deltas[home_id] += elo_delta
+            daily_elo_deltas[away_id] -= elo_delta
+        for team_id, delta in daily_elo_deltas.items():
+            self.elo[team_id] += delta
+        for game in daily_games:
+            home_id = int(game["home_team_id"])
+            away_id = int(game["away_team_id"])
+            home_win = int(game["home_win"])
+            home_score = int(game["home_score"])
+            away_score = int(game["away_score"])
+            self._state_for(home_id).update(won=home_win, runs_for=home_score, runs_against=away_score, game_date=game_date)
+            self._state_for(away_id).update(won=1 - home_win, runs_for=away_score, runs_against=home_score, game_date=game_date)
+        self.last_applied_date = game_date
+        return rows
+
+
 def build_pregame_features(
     games: Iterable[dict[str, Any]],
     config: FeatureConfig | None = None,
@@ -92,112 +274,37 @@ def build_pregame_features(
     materialized = [dict(game) for game in games]
     raise_for_failed_reports(validate_raw_games(materialized))
     ordered = _ordered_games(materialized)
-    elo: defaultdict[int, float] = defaultdict(lambda: config.initial_elo)
-    states: dict[int, _TeamState] = {}
-    current_season: int | None = None
+    calculator = PregameStateCalculator(config)
     features: list[dict[str, Any]] = []
 
     for (season, official_date), daily_iter in groupby(
         ordered,
         key=lambda row: (int(row["season"]), str(row["official_date"])),
     ):
-        daily_games = list(daily_iter)
-        game_date = date.fromisoformat(official_date)
-
-        if current_season != season:
-            if current_season is not None:
-                for team_id in list(elo.keys()):
-                    elo[team_id] = config.initial_elo + (elo[team_id] - config.initial_elo) * config.offseason_elo_carry
-            states = {}
-            current_season = season
-
-        def state_for(team_id: int) -> _TeamState:
-            if team_id not in states:
-                states[team_id] = _TeamState(config.recent_window)
-            return states[team_id]
-
-        daily_elo_deltas: defaultdict[int, float] = defaultdict(float)
-
-        for game in daily_games:
-            home_id = int(game["home_team_id"])
-            away_id = int(game["away_team_id"])
-            home_state = state_for(home_id).snapshot(game_date, config)
-            away_state = state_for(away_id).snapshot(game_date, config)
-            home_elo = float(elo[home_id])
-            away_elo = float(elo[away_id])
-            expected_home = _elo_expected(home_elo, away_elo, config.home_field_elo_advantage)
-
-            feature_row = {
-                "game_id": int(game["game_id"]),
-                "season": season,
-                "official_date": official_date,
-                "game_start_utc": game.get("game_start_utc"),
-                "away_team_id": away_id,
-                "away_team_name": game.get("away_team_name"),
-                "home_team_id": home_id,
-                "home_team_name": game.get("home_team_name"),
-                "away_probable_pitcher_id": game.get("away_probable_pitcher_id"),
-                "away_probable_pitcher_name": game.get("away_probable_pitcher_name"),
-                "home_probable_pitcher_id": game.get("home_probable_pitcher_id"),
-                "home_probable_pitcher_name": game.get("home_probable_pitcher_name"),
-                "venue_id": game.get("venue_id"),
-                "day_night": game.get("day_night"),
-                "home_elo_pregame": round(home_elo, 6),
-                "away_elo_pregame": round(away_elo, 6),
-                "home_elo_minus_away": round(home_elo - away_elo, 6),
-                "elo_expected_home_win_probability": round(expected_home, 9),
-                "home_games_before": home_state["games_before"],
-                "away_games_before": away_state["games_before"],
-                "home_season_win_pct": round(home_state["season_win_pct"], 9),
-                "away_season_win_pct": round(away_state["season_win_pct"], 9),
-                "season_win_pct_difference": round(home_state["season_win_pct"] - away_state["season_win_pct"], 9),
-                "home_recent_games_count": home_state["recent_games_count"],
-                "away_recent_games_count": away_state["recent_games_count"],
-                "home_recent_win_pct": round(home_state["recent_win_pct"], 9),
-                "away_recent_win_pct": round(away_state["recent_win_pct"], 9),
-                "recent_win_pct_difference": round(home_state["recent_win_pct"] - away_state["recent_win_pct"], 9),
-                "home_recent_runs_scored": round(home_state["recent_runs_scored"], 6),
-                "away_recent_runs_scored": round(away_state["recent_runs_scored"], 6),
-                "home_recent_runs_allowed": round(home_state["recent_runs_allowed"], 6),
-                "away_recent_runs_allowed": round(away_state["recent_runs_allowed"], 6),
-                "recent_run_margin_difference": round(
-                    (home_state["recent_runs_scored"] - home_state["recent_runs_allowed"])
-                    - (away_state["recent_runs_scored"] - away_state["recent_runs_allowed"]),
-                    6,
-                ),
-                "home_rest_days": home_state["rest_days"],
-                "away_rest_days": away_state["rest_days"],
-                "rest_days_difference": home_state["rest_days"] - away_state["rest_days"],
-                "home_has_prior_history": home_state["has_prior_history"],
-                "away_has_prior_history": away_state["has_prior_history"],
-                "home_history_through_date": home_state["history_through_date"],
-                "away_history_through_date": away_state["history_through_date"],
-                "feature_cutoff_policy": "prior_official_date_only",
-                "feature_version": config.feature_version,
-                "home_win": int(game["home_win"]),
-            }
-            features.append(feature_row)
-
-            actual_home = int(game["home_win"])
-            elo_delta = config.elo_k_factor * (actual_home - expected_home)
-            daily_elo_deltas[home_id] += elo_delta
-            daily_elo_deltas[away_id] -= elo_delta
-
-        # 같은 날짜 결과는 그날의 다른 경기 피처에 보이지 않도록 모든 피처 계산 후 반영합니다.
-        for team_id, delta in daily_elo_deltas.items():
-            elo[team_id] += delta
-
-        for game in daily_games:
-            home_id = int(game["home_team_id"])
-            away_id = int(game["away_team_id"])
-            home_win = int(game["home_win"])
-            home_score = int(game["home_score"])
-            away_score = int(game["away_score"])
-            state_for(home_id).update(won=home_win, runs_for=home_score, runs_against=away_score, game_date=game_date)
-            state_for(away_id).update(won=1 - home_win, runs_for=away_score, runs_against=home_score, game_date=game_date)
+        features.extend(calculator.apply_completed_date(list(daily_iter)))
 
     for row in features:
         probability = float(row["elo_expected_home_win_probability"])
         if not math.isfinite(probability):
             raise ValueError(f"비유한 Elo 확률이 생성되었습니다: game_id={row['game_id']}")
     return features
+
+
+def build_forecast_features(
+    completed_games: Iterable[dict[str, Any]],
+    scheduled_games: Iterable[dict[str, Any]],
+    config: FeatureConfig | None = None,
+) -> list[dict[str, Any]]:
+    """전날까지 완료된 경기로 당일 예정 경기의 타깃 없는 피처를 만듭니다."""
+
+    config = config or FeatureConfig()
+    history = [dict(game) for game in completed_games]
+    future = [dict(game) for game in scheduled_games]
+    raise_for_failed_reports(validate_raw_games(history))
+    calculator = PregameStateCalculator(config)
+    for (_, _), daily_iter in groupby(
+        _ordered_games(history),
+        key=lambda row: (int(row["season"]), str(row["official_date"])),
+    ):
+        calculator.apply_completed_date(list(daily_iter))
+    return calculator.snapshot(future)

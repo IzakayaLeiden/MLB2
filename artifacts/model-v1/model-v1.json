@@ -1,0 +1,105 @@
+{
+  "created_at_utc": "2026-07-21T12:50:47.935597Z",
+  "frozen": true,
+  "holdout_evaluation": {
+    "evaluated_at_utc": "2026-07-21T12:50:47.811849Z",
+    "passed": true,
+    "season": 2025
+  },
+  "model_sha256": "905a6f001a2f03649cba49027e00ada38c5b3c9bd29e008c953a7c182494bf21",
+  "model_type": "logistic_platt",
+  "model_version": "model-v1",
+  "retraining_during_shadow": false,
+  "runtime_model": {
+    "calibrator": {
+      "coefficient": 0.5004622692770604,
+      "intercept": 0.03174830196452333,
+      "l2": 1e-06
+    },
+    "feature_specs": [
+      {"name": "home_elo_minus_away", "source": "home_elo_minus_away", "transform": "numeric", "value": null},
+      {"name": "season_win_pct_difference", "source": "season_win_pct_difference", "transform": "numeric", "value": null},
+      {"name": "recent_win_pct_difference", "source": "recent_win_pct_difference", "transform": "numeric", "value": null},
+      {"name": "recent_run_margin_difference", "source": "recent_run_margin_difference", "transform": "numeric", "value": null},
+      {"name": "rest_days_difference", "source": "rest_days_difference", "transform": "numeric", "value": null},
+      {"name": "home_games_before", "source": "home_games_before", "transform": "numeric", "value": null},
+      {"name": "away_games_before", "source": "away_games_before", "transform": "numeric", "value": null},
+      {"name": "home_recent_games_count", "source": "home_recent_games_count", "transform": "numeric", "value": null},
+      {"name": "away_recent_games_count", "source": "away_recent_games_count", "transform": "numeric", "value": null},
+      {"name": "home_has_prior_history", "source": "home_has_prior_history", "transform": "numeric", "value": null},
+      {"name": "away_has_prior_history", "source": "away_has_prior_history", "transform": "numeric", "value": null},
+      {"name": "is_night_game", "source": "day_night", "transform": "equals", "value": "night"}
+    ],
+    "logistic": {
+      "coefficients": [
+        0.32097526532978576,
+        0.0391047831485797,
+        -0.1441255855354893,
+        0.09049978331255078,
+        0.001197841059563235,
+        -0.0018582448492017439,
+        -0.0077410828354829,
+        0.008135138404772473,
+        0.04008997970264306,
+        0.040076603249338316,
+        -0.06722230487236307,
+        -0.024879676921903265
+      ],
+      "feature_names": [
+        "home_elo_minus_away",
+        "season_win_pct_difference",
+        "recent_win_pct_difference",
+        "recent_run_margin_difference",
+        "rest_days_difference",
+        "home_games_before",
+        "away_games_before",
+        "home_recent_games_count",
+        "away_recent_games_count",
+        "home_has_prior_history",
+        "away_has_prior_history",
+        "is_night_game"
+      ],
+      "intercept": 0.12982891083040562,
+      "l2": 0.01,
+      "mean": [
+        0.26224058215384466,
+        0.001422494835916095,
+        -0.006465734266013971,
+        -0.0061910533146852876,
+        0.0038041958041958044,
+        77.77560839160839,
+        77.78215384615385,
+        9.629202797202797,
+        9.63076923076923,
+        0.9933986013986014,
+        0.9931748251748251,
+        0.6358601398601399
+      ],
+      "scale": [
+        91.6592365625266,
+        0.18984792702783884,
+        0.2879752188203581,
+        2.639987374234938,
+        0.36241160501681235,
+        47.00314345402786,
+        46.99301165547763,
+        1.5626471379536675,
+        1.5696612600244082,
+        0.08098036884271415,
+        0.08233220398958359,
+        0.4811881361766525
+      ]
+    }
+  },
+  "schema_version": "model-v1",
+  "selected_candidate": "logistic_platt:l2=0.01",
+  "selection_fingerprint": "2a09b40640b1dc5903fa2c41b8dc45ad90eb524d9788c3882c602ebc22a9852e",
+  "training": {
+    "calibration_rows": 1504,
+    "constant_home_win_rate": 0.5310387532896435,
+    "cutoff_date": "2026-07-20",
+    "l2": 0.01,
+    "raw_training_rows": 17875,
+    "rows": 19379
+  }
+}
