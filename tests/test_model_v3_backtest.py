@@ -3,9 +3,13 @@ from __future__ import annotations
 import pytest
 
 from mlb_predictor.model_v3_backtest import (
+    MODEL_V3_FEATURE_SPECS,
     _predict_season,
     _candidate_ranking_key,
     _holdout_diagnostics,
+    _predict_lda_season,
+    add_context_features,
+    add_neutral_context_features,
     add_interaction_features,
     add_neutral_interaction_features,
     add_starter_readiness_features,
@@ -43,6 +47,33 @@ def test_starter_readiness_uses_only_starts_before_official_date() -> None:
     assert result["home_starter_expected_innings"] == pytest.approx(5.5)
     assert result["away_starter_expected_innings"] == pytest.approx(5.0)
     assert result["starter_expected_innings_advantage"] == pytest.approx(0.5)
+
+
+def test_context_features_keep_recent_offense_and_defense_separate() -> None:
+    result = add_context_features(
+        [
+            {
+                "home_recent_runs_scored": 5.2,
+                "away_recent_runs_scored": 4.1,
+                "home_recent_runs_allowed": 3.8,
+                "away_recent_runs_allowed": 4.5,
+                "season_win_pct_difference": -0.2,
+                "recent_win_pct_difference": 0.1,
+            }
+        ]
+    )[0]
+
+    assert result["recent_offense_difference"] == pytest.approx(1.1)
+    assert result["recent_defense_advantage"] == pytest.approx(0.7)
+    assert result["season_win_pct_signed_square"] == pytest.approx(-0.04)
+    assert result["recent_win_pct_signed_square"] == pytest.approx(0.01)
+
+
+def test_neutral_context_features_preserve_original_candidate_contract() -> None:
+    result = add_neutral_context_features([{"game_id": 10}])[0]
+
+    assert result["game_id"] == 10
+    assert result["recent_offense_difference"] == 0.0
 
 
 def test_starter_readiness_ignores_relief_appearances_for_rest() -> None:
@@ -184,3 +215,23 @@ def test_holdout_diagnostics_distinguish_accuracy_from_coverage() -> None:
     assert high_confidence["minimum_distance_from_fifty"] == 0.10
     assert high_confidence["coverage"] == 0.5
     assert high_confidence["accuracy"] == 1.0
+
+
+def test_lda_candidate_returns_finite_probabilities() -> None:
+    rows = []
+    for season in (2020, 2021, 2022):
+        for index in range(8):
+            row = {
+                spec.source: (
+                    float(index + season % 3) if spec.transform == "numeric" else "night"
+                )
+                for spec in MODEL_V3_FEATURE_SPECS
+            }
+            row.update({"season": season, "home_win": index % 2})
+            rows.append(row)
+
+    validation, probability = _predict_lda_season(rows, season=2022, shrinkage=0.5)
+
+    assert len(validation) == 8
+    assert len(probability) == 8
+    assert all(0.0 < value < 1.0 for value in probability)

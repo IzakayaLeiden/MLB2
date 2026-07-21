@@ -46,11 +46,18 @@ DEFAULT_STARTER_REST_DAYS = 5
 PRIOR_START_WEIGHT = 3.0
 RECENT_START_WINDOW = 5
 RECENT_TRAINING_WINDOWS = (3, 4, 5)
+LDA_SHRINKAGE_VALUES = (0.1, 0.5, 0.9)
 READINESS_FEATURE_NAMES = (
     "starter_rest_days_difference",
     "starter_expected_innings_advantage",
     "away_starter_readiness_missing",
     "home_starter_readiness_missing",
+)
+CONTEXT_FEATURE_NAMES = (
+    "recent_offense_difference",
+    "recent_defense_advantage",
+    "season_win_pct_signed_square",
+    "recent_win_pct_signed_square",
 )
 INTERACTION_FEATURE_NAMES = (
     "elo_signed_square",
@@ -63,6 +70,7 @@ MODEL_V3_FEATURE_SPECS = DEFAULT_FEATURE_SPECS + tuple(
     FeatureSpec(name=name, source=name, transform="numeric", value=None)
     for name in (
         *STARTER_FEATURE_NAMES,
+        *CONTEXT_FEATURE_NAMES,
         *READINESS_FEATURE_NAMES,
         *LINEUP_FEATURE_NAMES,
         *RELIEVER_FEATURE_NAMES,
@@ -172,6 +180,40 @@ def add_starter_readiness_features(
     return augmented
 
 
+def add_context_features(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Split existing past-only team form into offense and defense components."""
+
+    augmented: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        season_difference = float(row["season_win_pct_difference"])
+        recent_difference = float(row["recent_win_pct_difference"])
+        row.update(
+            {
+                "recent_offense_difference": (
+                    float(row["home_recent_runs_scored"])
+                    - float(row["away_recent_runs_scored"])
+                ),
+                "recent_defense_advantage": (
+                    float(row["away_recent_runs_allowed"])
+                    - float(row["home_recent_runs_allowed"])
+                ),
+                "season_win_pct_signed_square": season_difference * abs(season_difference),
+                "recent_win_pct_signed_square": recent_difference * abs(recent_difference),
+            }
+        )
+        augmented.append(row)
+    return augmented
+
+
+def add_neutral_context_features(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [dict(row, **{name: 0.0 for name in CONTEXT_FEATURE_NAMES}) for row in rows]
+
+
 def add_neutral_interaction_features(
     rows: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -232,6 +274,49 @@ def _predict_season(
         raise ValueError(f"Insufficient rows for model-v3 season {season}.")
     model = _fit(training, l2=l2)
     probability = model.predict_proba(extract_feature_matrix(validation, MODEL_V3_FEATURE_SPECS))
+    return validation, probability
+
+
+def _predict_lda_season(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    season: int,
+    shrinkage: float,
+) -> tuple[list[Mapping[str, Any]], np.ndarray]:
+    training = [row for row in rows if int(row["season"]) < int(season)]
+    validation = [row for row in rows if int(row["season"]) == int(season)]
+    if not training or not validation:
+        raise ValueError(f"Insufficient rows for model-v3 LDA season {season}.")
+    matrix = extract_feature_matrix(training, MODEL_V3_FEATURE_SPECS)
+    target = _target(training)
+    mean = matrix.mean(axis=0)
+    scale = matrix.std(axis=0)
+    scale = np.where(scale < 1e-12, 1.0, scale)
+    standardized = (matrix - mean) / scale
+    negative = standardized[target == 0.0]
+    positive = standardized[target == 1.0]
+    if not len(negative) or not len(positive):
+        raise ValueError(f"Both classes are required for model-v3 LDA season {season}.")
+    negative_mean = negative.mean(axis=0)
+    positive_mean = positive.mean(axis=0)
+    centered = np.vstack((negative - negative_mean, positive - positive_mean))
+    covariance = centered.T @ centered / max(len(centered) - 2, 1)
+    diagonal = np.diag(np.diag(covariance))
+    regularized = (1.0 - shrinkage) * covariance + shrinkage * diagonal
+    regularized += np.eye(regularized.shape[0]) * 1e-6
+    coefficients = np.linalg.solve(regularized, positive_mean - negative_mean)
+    positive_rate = float(target.mean())
+    intercept = (
+        -0.5 * float((positive_mean + negative_mean) @ coefficients)
+        + math.log(positive_rate / (1.0 - positive_rate))
+    )
+    validation_matrix = (extract_feature_matrix(validation, MODEL_V3_FEATURE_SPECS) - mean) / scale
+    scores = intercept + validation_matrix @ coefficients
+    probability = np.empty_like(scores, dtype=float)
+    nonnegative = scores >= 0.0
+    probability[nonnegative] = 1.0 / (1.0 + np.exp(-scores[nonnegative]))
+    exponential = np.exp(scores[~nonnegative])
+    probability[~nonnegative] = exponential / (1.0 + exponential)
     return validation, probability
 
 
@@ -356,6 +441,7 @@ def evaluate_model_v3_challenger(
         window_label = "all" if training_years is None else f"{training_years}y"
         key = f"model_v3:{mode}:l2={l2:g}:window={window_label}"
         candidates[key] = {
+            "model_type": "logistic",
             "feature_mode": mode,
             "l2": l2,
             "training_years": training_years,
@@ -371,13 +457,51 @@ def evaluate_model_v3_challenger(
                 for season in BACKTEST_SEASONS
             },
         }
+    lda_modes = {
+        "starter_readiness_lineup_reliever",
+        "starter_readiness_lineup_reliever_interactions",
+        "starter_readiness_lineup_reliever_context",
+        "starter_readiness_lineup_reliever_context_interactions",
+    }
+    for mode in sorted(lda_modes.intersection(augmented_variants)):
+        for shrinkage in LDA_SHRINKAGE_VALUES:
+            rows: list[dict[str, Any]] = []
+            for season in BACKTEST_SEASONS:
+                validation, probability = _predict_lda_season(
+                    augmented_variants[mode],
+                    season=season,
+                    shrinkage=shrinkage,
+                )
+                rows.extend(
+                    {"season": season, "home_win": int(row["home_win"]), "probability": float(value)}
+                    for row, value in zip(validation, probability)
+                )
+            key = f"model_v3:lda:{mode}:shrinkage={shrinkage:g}:window=all"
+            candidates[key] = {
+                "model_type": "lda",
+                "feature_mode": mode,
+                "shrinkage": shrinkage,
+                "training_years": None,
+                "evaluation": evaluate_prediction_set(
+                    [row["home_win"] for row in rows],
+                    [row["probability"] for row in rows],
+                ),
+                "season_evaluations": {
+                    str(season): evaluate_prediction_set(
+                        [row["home_win"] for row in rows if int(row["season"]) == season],
+                        [row["probability"] for row in rows if int(row["season"]) == season],
+                    )
+                    for season in BACKTEST_SEASONS
+                },
+            }
     selected_key = min(
         candidates,
         key=lambda key: _candidate_ranking_key(key, candidates),
     )
     selected = candidates[selected_key]
     selected_rows = augmented_variants[str(selected["feature_mode"])]
-    selected_l2 = float(selected["l2"])
+    selected_model_type = str(selected["model_type"])
+    selected_l2 = float(selected.get("l2", 0.0))
     selected_training_years = selected["training_years"]
 
     official_rows = generate_historical_audit_rows(
@@ -388,12 +512,19 @@ def evaluate_model_v3_challenger(
     official_by_game = {int(row["game_id"]): row for row in official_rows}
     prediction_rows: list[dict[str, Any]] = []
     for season in (*BACKTEST_SEASONS, DEVELOPMENT_HOLDOUT_SEASON):
-        validation, v3_probability = _predict_season(
-            selected_rows,
-            season=season,
-            l2=selected_l2,
-            training_years=selected_training_years,
-        )
+        if selected_model_type == "logistic":
+            validation, v3_probability = _predict_season(
+                selected_rows,
+                season=season,
+                l2=selected_l2,
+                training_years=selected_training_years,
+            )
+        else:
+            validation, v3_probability = _predict_lda_season(
+                selected_rows,
+                season=season,
+                shrinkage=float(selected["shrinkage"]),
+            )
         v2_validation, v2_probability = _predict_v2_season(v2_rows, season=season, l2=0.01)
         if [int(row["game_id"]) for row in validation] != [int(row["game_id"]) for row in v2_validation]:
             raise ValueError(f"model-v2 and model-v3 validation rows differ for {season}.")
@@ -570,7 +701,8 @@ def run_model_v3_backtest(
     sources.extend(roster_sources)
     sources.extend(reliever_sources)
 
-    rolling = add_rolling_starter_features(rows, prior_stats, game_logs)
+    neutral_context_rows = add_neutral_context_features(rows)
+    rolling = add_rolling_starter_features(neutral_context_rows, prior_stats, game_logs)
     readiness = add_starter_readiness_features(rolling, prior_stats, game_logs)
     bullpen = add_bullpen_workload_features(rolling, game_logs, team_logs)
     readiness_bullpen = add_starter_readiness_features(bullpen, prior_stats, game_logs)
@@ -588,6 +720,7 @@ def run_model_v3_backtest(
         reliever_prior_stats,
         reliever_game_logs,
     )
+    readiness_lineup_reliever_context = add_context_features(readiness_lineup_reliever)
     report, predictions = evaluate_model_v3_challenger(
         rows,
         rolling,
@@ -615,6 +748,12 @@ def run_model_v3_backtest(
             ),
             "starter_readiness_lineup_reliever_bullpen_interactions": add_interaction_features(
                 readiness_lineup_reliever_bullpen
+            ),
+            "starter_readiness_lineup_reliever_context": add_neutral_interaction_features(
+                readiness_lineup_reliever_context
+            ),
+            "starter_readiness_lineup_reliever_context_interactions": add_interaction_features(
+                readiness_lineup_reliever_context
             ),
         },
         l2_values=l2_values,

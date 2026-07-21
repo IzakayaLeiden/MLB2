@@ -17,6 +17,7 @@ from .lineup import (
 )
 from .model_v3_backtest import (
     MODEL_V3_FEATURE_SPECS,
+    add_context_features,
     add_interaction_features,
     add_starter_readiness_features,
 )
@@ -28,7 +29,7 @@ from .pitching_backtest import (
 )
 
 
-SNAPSHOT_SCHEMA_VERSION = "pregame-model-v3-snapshot-v1"
+SNAPSHOT_SCHEMA_VERSION = "pregame-model-v3-snapshot-v2"
 PROVENANCE_MODE = "verified_point_in_time"
 
 
@@ -358,7 +359,8 @@ def collect_pregame_model_v3_snapshots(
         refresh=refresh,
     )
 
-    augmented = add_rolling_starter_features(base_rows, starter_prior, starter_logs)
+    augmented = add_context_features(base_rows)
+    augmented = add_rolling_starter_features(augmented, starter_prior, starter_logs)
     augmented = add_starter_readiness_features(augmented, starter_prior, starter_logs)
     augmented = add_lineup_features(augmented, resolved_lineups, batting_prior, batting_logs)
     augmented = add_reliever_availability_features(augmented, rosters, reliever_prior, reliever_logs)
