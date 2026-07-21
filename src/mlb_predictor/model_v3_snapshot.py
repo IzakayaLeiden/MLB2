@@ -32,9 +32,10 @@ from .pitching_backtest import (
     collect_prior_season_pitching_stats,
 )
 from .run_strength import add_dynamic_run_strength_features
+from .schedule_context import add_schedule_context_features, add_schedule_context_interactions
 
 
-SNAPSHOT_SCHEMA_VERSION = "pregame-model-v3-snapshot-v5"
+SNAPSHOT_SCHEMA_VERSION = "pregame-model-v3-snapshot-v6"
 PROVENANCE_MODE = "verified_point_in_time"
 
 
@@ -299,6 +300,7 @@ def collect_pregame_model_v3_snapshots(
     history = list(completed_games)
     base_rows = build_forecast_features(history, games)
     base_rows = add_dynamic_run_strength_features(base_rows, history)
+    base_rows = add_schedule_context_features(base_rows, history)
     season = int(target.year)
     target_seasons = [season]
 
@@ -393,6 +395,7 @@ def collect_pregame_model_v3_snapshots(
     )
     augmented = add_reliever_availability_features(augmented, rosters, reliever_prior, reliever_logs)
     augmented = add_interaction_features(augmented)
+    augmented = add_schedule_context_interactions(augmented)
     augmented_by_game = {int(row["game_id"]): row for row in augmented}
 
     all_sources = [

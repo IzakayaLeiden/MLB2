@@ -50,6 +50,17 @@ from .run_strength import (
     add_dynamic_run_strength_features,
     add_neutral_run_strength_features,
 )
+from .schedule_context import (
+    FATIGUE_CONTEXT_FEATURE_NAMES,
+    SCHEDULE_CONTEXT_FEATURE_NAMES,
+    SCHEDULE_CONTEXT_INTERACTION_NAMES,
+    VENUE_CONTEXT_FEATURE_NAMES,
+    add_neutral_schedule_context_features,
+    add_schedule_context_features,
+    add_schedule_context_interactions,
+    ensure_schedule_context_feature_values,
+    select_schedule_context_feature_block,
+)
 
 
 DEFAULT_EXPECTED_START_OUTS = 15.0
@@ -58,6 +69,13 @@ PRIOR_START_WEIGHT = 3.0
 RECENT_START_WINDOW = 5
 RECENT_TRAINING_WINDOWS = (3, 4, 5)
 LDA_SHRINKAGE_VALUES = (0.1, 0.5, 0.9)
+BLEND_WEIGHTS = (0.25, 0.5, 0.75)
+BLEND_FEATURE_MODES = {
+    "starter_readiness_lineup_reliever_interactions",
+    "starter_readiness_lineup_reliever_schedule_interactions",
+    "starter_readiness_lineup_reliever_venue_interactions",
+    "starter_readiness_lineup_reliever_fatigue_interactions",
+}
 READINESS_FEATURE_NAMES = (
     "starter_rest_days_difference",
     "starter_expected_innings_advantage",
@@ -108,6 +126,8 @@ MODEL_V3_FEATURE_SPECS = DEFAULT_FEATURE_SPECS + tuple(
         *PLATOON_FEATURE_NAMES,
         *PLATOON_PERFORMANCE_FEATURE_NAMES,
         *RUN_STRENGTH_FEATURE_NAMES,
+        *SCHEDULE_CONTEXT_FEATURE_NAMES,
+        *SCHEDULE_CONTEXT_INTERACTION_NAMES,
         *READINESS_FEATURE_NAMES,
         *LINEUP_FEATURE_NAMES,
         *RELIEVER_FEATURE_NAMES,
@@ -118,6 +138,24 @@ MODEL_V3_FEATURE_SPECS = DEFAULT_FEATURE_SPECS + tuple(
 
 def _target(rows: Sequence[Mapping[str, Any]]) -> np.ndarray:
     return np.asarray([int(row["home_win"]) for row in rows], dtype=float)
+
+
+def blend_with_elo(
+    rows: Sequence[Mapping[str, Any]],
+    model_probability: Sequence[float],
+    *,
+    model_weight: float,
+) -> np.ndarray:
+    if not 0.0 <= model_weight <= 1.0:
+        raise ValueError("model_weight must be between zero and one.")
+    if len(rows) != len(model_probability):
+        raise ValueError("rows and model_probability must have equal length.")
+    elo = np.asarray(
+        [float(row["elo_expected_home_win_probability"]) for row in rows],
+        dtype=float,
+    )
+    model = np.asarray(model_probability, dtype=float)
+    return model_weight * model + (1.0 - model_weight) * elo
 
 
 def _fit(rows: Sequence[Mapping[str, Any]], *, l2: float) -> StandardizedLogisticRegression:
@@ -417,9 +455,11 @@ def add_neutral_platoon_performance_features(rows: Iterable[Mapping[str, Any]]) 
 
 
 def _neutralize_trend_and_platoon(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    return add_neutral_run_strength_features(
-        add_neutral_platoon_performance_features(
-            add_neutral_platoon_features(add_neutral_starter_trend_features(rows))
+    return add_neutral_schedule_context_features(
+        add_neutral_run_strength_features(
+            add_neutral_platoon_performance_features(
+                add_neutral_platoon_features(add_neutral_starter_trend_features(rows))
+            )
         )
     )
 
@@ -626,6 +666,10 @@ def evaluate_model_v3_challenger(
     bootstrap_iterations: int = 10_000,
     seed: int = 20260721,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    augmented_variants = {
+        mode: ensure_schedule_context_feature_values(rows)
+        for mode, rows in augmented_variants.items()
+    }
     candidate_configs = [
         (mode, float(l2), None)
         for mode in augmented_variants
@@ -655,11 +699,17 @@ def evaluate_model_v3_challenger(
                 training_years=training_years,
             )
             output_rows.extend(
-                {"season": season, "home_win": int(row["home_win"]), "probability": float(value)}
+                {
+                    "game_id": int(row["game_id"]),
+                    "season": season,
+                    "home_win": int(row["home_win"]),
+                    "probability": float(value),
+                }
                 for row, value in zip(validation, probability)
             )
 
     candidates: dict[str, Any] = {}
+    candidate_prediction_rows: dict[str, list[dict[str, Any]]] = {}
     for (mode, l2, training_years), rows in candidate_rows.items():
         window_label = "all" if training_years is None else f"{training_years}y"
         key = f"model_v3:{mode}:l2={l2:g}:window={window_label}"
@@ -680,6 +730,51 @@ def evaluate_model_v3_challenger(
                 for season in BACKTEST_SEASONS
             },
         }
+        candidate_prediction_rows[key] = rows
+
+    for base_key, base_candidate in list(candidates.items()):
+        if str(base_candidate["feature_mode"]) not in BLEND_FEATURE_MODES:
+            continue
+        base_rows_for_blend = candidate_prediction_rows[base_key]
+        elo_by_season = {
+            season: {
+                int(row["game_id"]): float(row["elo_expected_home_win_probability"])
+                for row in base_rows
+                if int(row["season"]) == season
+            }
+            for season in BACKTEST_SEASONS
+        }
+        for model_weight in BLEND_WEIGHTS:
+            blended_rows = [
+                {
+                    **row,
+                    "probability": (
+                        model_weight * float(row["probability"])
+                        + (1.0 - model_weight)
+                        * elo_by_season[int(row["season"])][int(row["game_id"])]
+                    ),
+                }
+                for row in base_rows_for_blend
+            ]
+            key = f"model_v3:blend:model_weight={model_weight:g}:{base_key}"
+            candidates[key] = {
+                **base_candidate,
+                "model_type": "blend",
+                "base_model_type": "logistic",
+                "model_weight": model_weight,
+                "base_candidate": base_key,
+                "evaluation": evaluate_prediction_set(
+                    [row["home_win"] for row in blended_rows],
+                    [row["probability"] for row in blended_rows],
+                ),
+                "season_evaluations": {
+                    str(season): evaluate_prediction_set(
+                        [row["home_win"] for row in blended_rows if int(row["season"]) == season],
+                        [row["probability"] for row in blended_rows if int(row["season"]) == season],
+                    )
+                    for season in BACKTEST_SEASONS
+                },
+            }
     lda_modes = {
         "starter_readiness_lineup_reliever",
         "starter_readiness_lineup_reliever_interactions",
@@ -743,13 +838,19 @@ def evaluate_model_v3_challenger(
     official_by_game = {int(row["game_id"]): row for row in official_rows}
     prediction_rows: list[dict[str, Any]] = []
     for season in (*BACKTEST_SEASONS, DEVELOPMENT_HOLDOUT_SEASON):
-        if selected_model_type == "logistic":
+        if selected_model_type in {"logistic", "blend"}:
             validation, v3_probability = _predict_season(
                 selected_rows,
                 season=season,
                 l2=selected_l2,
                 training_years=selected_training_years,
             )
+            if selected_model_type == "blend":
+                v3_probability = blend_with_elo(
+                    validation,
+                    v3_probability,
+                    model_weight=float(selected["model_weight"]),
+                )
         else:
             validation, v3_probability = _predict_lda_season(
                 selected_rows,
@@ -873,7 +974,8 @@ def run_model_v3_backtest(
     seed: int = 20260721,
 ) -> dict[str, Any]:
     rows = sorted((dict(row) for row in feature_rows), key=lambda row: (str(row["official_date"]), int(row["game_id"])))
-    run_strength_materialized = add_dynamic_run_strength_features(rows, completed_games)
+    games = [dict(game) for game in completed_games]
+    run_strength_materialized = add_dynamic_run_strength_features(rows, games)
     run_strength_by_game = {int(row["game_id"]): row for row in run_strength_materialized}
     target_seasons = sorted({int(row["season"]) for row in rows if int(row["season"]) <= DEVELOPMENT_HOLDOUT_SEASON})
     prior_stats, sources = collect_prior_season_pitching_stats(
@@ -1013,6 +1115,18 @@ def run_model_v3_backtest(
         ),
         run_strength_by_game,
     )
+    readiness_lineup_reliever_schedule = add_schedule_context_features(
+        _neutralize_trend_and_platoon(readiness_lineup_reliever),
+        games,
+    )
+    readiness_lineup_reliever_venue = select_schedule_context_feature_block(
+        readiness_lineup_reliever_schedule,
+        VENUE_CONTEXT_FEATURE_NAMES,
+    )
+    readiness_lineup_reliever_fatigue = select_schedule_context_feature_block(
+        readiness_lineup_reliever_schedule,
+        FATIGUE_CONTEXT_FEATURE_NAMES,
+    )
     report, predictions = evaluate_model_v3_challenger(
         rows,
         rolling,
@@ -1086,6 +1200,18 @@ def run_model_v3_backtest(
             ),
             "starter_readiness_lineup_reliever_run_strength_interactions": add_interaction_features(
                 readiness_lineup_reliever_run_strength
+            ),
+            "starter_readiness_lineup_reliever_schedule_interactions": add_interaction_features(
+                readiness_lineup_reliever_schedule
+            ),
+            "starter_readiness_lineup_reliever_schedule_full_interactions": add_schedule_context_interactions(
+                add_interaction_features(readiness_lineup_reliever_schedule)
+            ),
+            "starter_readiness_lineup_reliever_venue_interactions": add_interaction_features(
+                readiness_lineup_reliever_venue
+            ),
+            "starter_readiness_lineup_reliever_fatigue_interactions": add_interaction_features(
+                readiness_lineup_reliever_fatigue
             ),
         },
         l2_values=l2_values,

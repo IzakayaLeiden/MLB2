@@ -16,7 +16,19 @@ from mlb_predictor.model_v3_backtest import (
     add_interaction_features,
     add_neutral_interaction_features,
     add_starter_readiness_features,
+    blend_with_elo,
 )
+
+
+def test_blend_with_elo_uses_fixed_model_weight() -> None:
+    rows = [
+        {"elo_expected_home_win_probability": 0.60},
+        {"elo_expected_home_win_probability": 0.40},
+    ]
+
+    result = blend_with_elo(rows, [0.80, 0.20], model_weight=0.25)
+
+    assert result.tolist() == pytest.approx([0.65, 0.35])
 
 
 def test_starter_readiness_uses_only_starts_before_official_date() -> None:
