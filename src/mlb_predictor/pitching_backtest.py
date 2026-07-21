@@ -23,6 +23,8 @@ STARTER_FEATURE_NAMES = (
     "starter_home_run_rate_advantage",
     "away_starter_history_missing",
     "home_starter_history_missing",
+    "bullpen_pitches_1d_advantage",
+    "bullpen_pitches_3d_advantage",
 )
 STARTER_CHALLENGER_FEATURE_SPECS = DEFAULT_FEATURE_SPECS + tuple(
     FeatureSpec(name=name, source=name, transform="numeric", value=None)
@@ -128,7 +130,8 @@ def collect_current_season_pitching_game_logs(
                         if not isinstance(split, Mapping) or not split.get("date"):
                             continue
                         normalized = normalize_pitcher_stats_payload({"stats": [{"splits": [split]}]})
-                        splits.append({"date": str(split["date"]), "stats": normalized})
+                        game = split.get("game", {}) if isinstance(split.get("game"), Mapping) else {}
+                        splits.append({"date": str(split["date"]), "game_id": game.get("gamePk"), "stats": normalized})
                 logs[(int(season), int(person["id"]))] = sorted(splits, key=lambda item: item["date"])
     return logs, sources
 
@@ -165,6 +168,8 @@ def add_prior_season_starter_features(
                 "starter_home_run_rate_advantage": rates["away"]["home_runs"] - rates["home"]["home_runs"],
                 "away_starter_history_missing": missing["away"],
                 "home_starter_history_missing": missing["home"],
+                "bullpen_pitches_1d_advantage": 0,
+                "bullpen_pitches_3d_advantage": 0,
             }
         )
         augmented.append(row)
@@ -230,8 +235,115 @@ def add_rolling_starter_features(
                 "starter_home_run_rate_advantage": rates["away"]["home_runs"] - rates["home"]["home_runs"],
                 "away_starter_history_missing": missing["away"],
                 "home_starter_history_missing": missing["home"],
+                "bullpen_pitches_1d_advantage": 0,
+                "bullpen_pitches_3d_advantage": 0,
             }
         )
+        augmented.append(row)
+    return augmented
+
+
+def collect_team_pitching_game_logs(
+    *,
+    client: MlbStatsApiClient,
+    rows: Sequence[Mapping[str, Any]],
+    target_seasons: Sequence[int],
+    refresh: bool = False,
+) -> tuple[dict[tuple[int, int], list[dict[str, Any]]], list[dict[str, Any]]]:
+    logs: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    sources: list[dict[str, Any]] = []
+    for season in target_seasons:
+        team_ids = sorted(
+            {
+                int(team_id)
+                for row in rows
+                if int(row["season"]) == int(season)
+                for team_id in (row["away_team_id"], row["home_team_id"])
+            }
+        )
+        for team_id in team_ids:
+            response = client.fetch_team_pitching_game_log(team_id, int(season), refresh=refresh)
+            sources.append(
+                {
+                    "stats_season": int(season),
+                    "stats_type": "teamGameLog",
+                    "team_id": team_id,
+                    "cache_path": str(response.cache_path),
+                    "fetched_at_utc": response.fetched_at_utc,
+                    "source_url": response.source_url,
+                    "response_sha256": response.response_sha256,
+                }
+            )
+            splits: list[dict[str, Any]] = []
+            for group in response.payload.get("stats", []):
+                if not isinstance(group, Mapping):
+                    continue
+                for split in group.get("splits", []):
+                    if not isinstance(split, Mapping) or not split.get("date"):
+                        continue
+                    game = split.get("game", {}) if isinstance(split.get("game"), Mapping) else {}
+                    stat = split.get("stat", {}) if isinstance(split.get("stat"), Mapping) else {}
+                    splits.append(
+                        {
+                            "date": str(split["date"]),
+                            "game_id": game.get("gamePk"),
+                            "pitches_thrown": int(stat.get("numberOfPitches") or stat.get("pitchesThrown") or 0),
+                        }
+                    )
+            logs[(int(season), team_id)] = sorted(splits, key=lambda item: (item["date"], int(item.get("game_id") or 0)))
+    return logs, sources
+
+
+def add_bullpen_workload_features(
+    rows: Sequence[Mapping[str, Any]],
+    player_game_logs: Mapping[tuple[int, int], Sequence[Mapping[str, Any]]],
+    team_game_logs: Mapping[tuple[int, int], Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    from datetime import date
+
+    starter_pitches: dict[int, int] = {}
+    for row in rows:
+        season = int(row["season"])
+        game_id = int(row["game_id"])
+        for side in ("away", "home"):
+            pitcher_id = row.get(f"{side}_probable_pitcher_id")
+            if pitcher_id is None:
+                continue
+            for appearance in player_game_logs.get((season, int(pitcher_id)), []):
+                if int(appearance.get("game_id") or -1) == game_id:
+                    starter_pitches[game_id] = int(appearance["stats"].get("pitches_thrown", 0))
+                    break
+
+    bullpen_by_team: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for key, appearances in team_game_logs.items():
+        bullpen_by_team[key] = [
+            {
+                "date": appearance["date"],
+                "game_id": appearance["game_id"],
+                "pitches": max(0, int(appearance["pitches_thrown"]) - starter_pitches.get(int(appearance.get("game_id") or -1), 0)),
+            }
+            for appearance in appearances
+        ]
+
+    augmented: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        target = date.fromisoformat(str(row["official_date"]))
+        workload: dict[str, tuple[int, int]] = {}
+        for side in ("away", "home"):
+            team_id = int(row[f"{side}_team_id"])
+            pitches_1d = 0
+            pitches_3d = 0
+            for appearance in bullpen_by_team.get((int(row["season"]), team_id), []):
+                days_ago = (target - date.fromisoformat(str(appearance["date"]))).days
+                if 1 <= days_ago <= 3:
+                    pitches_3d += int(appearance["pitches"])
+                    if days_ago == 1:
+                        pitches_1d += int(appearance["pitches"])
+            workload[side] = (pitches_1d, pitches_3d)
+        row["bullpen_pitches_1d_advantage"] = workload["away"][0] - workload["home"][0]
+        row["bullpen_pitches_3d_advantage"] = workload["away"][1] - workload["home"][1]
+        row["bullpen_feature_provenance"] = "retrospective_team_minus_starter_game_log_v1"
         augmented.append(row)
     return augmented
 
@@ -377,7 +489,7 @@ def evaluate_retrospective_starter_challenger(
             "starter_stats": "previous_regular_season_only",
             "starter_identity": "historical_schedule_probable_pitcher_posthoc",
             "starter_identity_point_in_time_verified": False,
-            "bullpen_features_included": False,
+            "bullpen_features_included": selected_mode == "prior_plus_current_bullpen",
         },
         "ranking_policy": ["accuracy_desc", "log_loss", "brier_score"],
         "selection_seasons": list(BACKTEST_SEASONS),
@@ -429,9 +541,18 @@ def run_retrospective_pitching_backtest(
         refresh=refresh,
     )
     sources.extend(game_log_sources)
+    team_game_logs, team_game_log_sources = collect_team_pitching_game_logs(
+        client=client,
+        rows=rows,
+        target_seasons=target_seasons,
+        refresh=refresh,
+    )
+    sources.extend(team_game_log_sources)
+    rolling = add_rolling_starter_features(rows, stats, game_logs)
     augmented_variants = {
         "prior_season": add_prior_season_starter_features(rows, stats),
-        "prior_plus_current": add_rolling_starter_features(rows, stats, game_logs),
+        "prior_plus_current": rolling,
+        "prior_plus_current_bullpen": add_bullpen_workload_features(rolling, game_logs, team_game_logs),
     }
     report, predictions = evaluate_retrospective_starter_challenger(
         rows,

@@ -120,6 +120,13 @@ def test_people_game_log_url_uses_game_log_hydration() -> None:
     assert query["hydrate"] == ["stats(group=[pitching],type=[gameLog],season=2025)"]
 
 
+def test_team_game_log_url_is_regular_season_only() -> None:
+    url = MlbStatsApiClient.build_team_pitching_game_log_url(119, 2025)
+    query = parse_qs(urlparse(url).query)
+    assert urlparse(url).path == "/api/v1/teams/119/stats"
+    assert query == {"stats": ["gameLog"], "group": ["pitching"], "season": ["2025"], "gameType": ["R"]}
+
+
 def test_client_does_not_cache_invalid_network_payload(tmp_path, monkeypatch) -> None:
     client = MlbStatsApiClient(tmp_path)
     monkeypatch.setattr(client, "_request_json", lambda url: {})

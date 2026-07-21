@@ -17,9 +17,11 @@
 - 투수 성적 후보는 두 가지로 제한했다.
   - `prior_season`: 직전 정규시즌 전체 성적
   - `prior_plus_current`: 직전 시즌 성적과 목표 경기의 공식 날짜보다 앞선 당해 시즌 gameLog 누적
+- `prior_plus_current`에 직전 1일·3일 불펜 투구량 차이를 더한 후보도 비교했다. 팀 전체 투구 수에서 해당 경기 선발의 투구 수를 빼 불펜 workload를 근사했고, 같은 공식 날짜 경기는 제외했다.
 - 적은 표본은 200타자 상당의 고정 리그 사전분포로 축소했다.
 - 2022~2024 7,278경기에서 두 피처 모드와 L2를 Accuracy 우선, Log Loss와 Brier 차순으로 선택했다.
 - 선택된 후보는 `starter_logistic:prior_plus_current:l2=0.01`이다.
+- 선발+불펜 후보의 선택 구간 Accuracy는 57.47%로 선발-only 57.65%보다 낮았고 Log Loss/Brier도 소폭 나빠 선택되지 않았다.
 - 2025 2,426경기는 개발용 시간 외 비교 구간으로 사용했다.
 
 중요한 제한이 있다. 과거 일정에서 읽은 선발 ID는 사후 응답이며, 경기 60분 전에 관측됐다는 타임스탬프가 없다. 따라서 이 평가는 **회고적 가능성 조사**이지 배포 가능한 검증이 아니다. 코드가 결과와 관계없이 `promotion_allowed=false`를 강제한다.
@@ -69,10 +71,11 @@
 ## 다음 개선 순서
 
 1. 선발의 최근 휴식일과 예상 이닝을 추가한다.
-2. 이미 봉인 중인 직전 1·3일 불펜 투구량을 challenger에 추가한다.
-3. `model-v1 + starter`, `model-v1 + starter + bullpen`, Elo 혼합을 같은 시간 분할로 비교한다.
-4. 모든 후보는 Accuracy가 Elo를 넘고, Log Loss와 Brier가 `model-v1`보다 나빠지지 않아야 한다.
-5. 과거 회고 결과와 별개로 `pregame-pitching-snapshot-v2`의 실제 경기 전 자료에서 champion-challenger 결과를 계속 기록한다.
+2. 불펜 전체 투구량 대신 핵심 고레버리지 투수별 가용성을 검증한다.
+3. 확정 라인업과 상대 선발 손잡이 기준 타격 피처를 추가한다.
+4. `model-v1 + starter`, Elo 혼합과 비선형 모델을 같은 시간 분할로 비교한다.
+5. 모든 후보는 Accuracy가 Elo를 넘고, Log Loss와 Brier가 `model-v1`보다 나빠지지 않아야 한다.
+6. 과거 회고 결과와 별개로 `pregame-pitching-snapshot-v2`의 실제 경기 전 자료에서 champion-challenger 결과를 계속 기록한다.
 
 ## 재현
 

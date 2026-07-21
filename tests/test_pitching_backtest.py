@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from mlb_predictor.pitching_backtest import add_prior_season_starter_features, add_rolling_starter_features
+from mlb_predictor.pitching_backtest import add_bullpen_workload_features, add_prior_season_starter_features, add_rolling_starter_features
 
 
 def test_prior_season_features_use_only_previous_year_stats() -> None:
@@ -63,3 +63,33 @@ def test_rolling_features_exclude_target_date_game_log() -> None:
 
     assert result["pitching_stats_through_policy"] == "strictly_before_official_date"
     assert result["starter_k_minus_bb_rate_difference"] > 0
+
+
+def test_bullpen_workload_excludes_same_date_and_subtracts_starter() -> None:
+    row = {
+        "game_id": 10,
+        "season": 2025,
+        "official_date": "2025-04-10",
+        "away_team_id": 2,
+        "home_team_id": 1,
+        "away_probable_pitcher_id": 22,
+        "home_probable_pitcher_id": 11,
+    }
+    player_logs = {
+        (2025, 11): [{"date": "2025-04-09", "game_id": 9, "stats": {"pitches_thrown": 70}}],
+        (2025, 22): [{"date": "2025-04-09", "game_id": 8, "stats": {"pitches_thrown": 80}}],
+    }
+    team_logs = {
+        (2025, 1): [
+            {"date": "2025-04-09", "game_id": 9, "pitches_thrown": 120},
+            {"date": "2025-04-10", "game_id": 10, "pitches_thrown": 999},
+        ],
+        (2025, 2): [{"date": "2025-04-09", "game_id": 8, "pitches_thrown": 110}],
+    }
+    prior_home = {**row, "game_id": 9, "official_date": "2025-04-09", "home_probable_pitcher_id": 11}
+    prior_away = {**row, "game_id": 8, "official_date": "2025-04-09", "away_probable_pitcher_id": 22}
+    results = add_bullpen_workload_features([prior_home, prior_away, row], player_logs, team_logs)
+    result = next(item for item in results if item["game_id"] == 10)
+
+    assert result["bullpen_pitches_1d_advantage"] == -20
+    assert result["bullpen_pitches_3d_advantage"] == -20

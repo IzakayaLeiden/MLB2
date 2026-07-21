@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 API_BASE_URL = "https://statsapi.mlb.com/api/v1/schedule"
 PEOPLE_BASE_URL = "https://statsapi.mlb.com/api/v1/people"
 GAME_BASE_URL = "https://statsapi.mlb.com/api/v1/game"
+TEAM_BASE_URL = "https://statsapi.mlb.com/api/v1/teams"
 
 
 def _parse_date(value: str | date) -> date:
@@ -105,6 +106,13 @@ class MlbStatsApiClient:
     @staticmethod
     def build_people_pitching_game_log_url(person_ids: Sequence[int], season: int) -> str:
         return MlbStatsApiClient._build_people_pitching_hydrate_url(person_ids, season, stats_type="gameLog")
+
+    @staticmethod
+    def build_team_pitching_game_log_url(team_id: int, season: int) -> str:
+        if team_id <= 0 or season < 1876:
+            raise ValueError("team_id or season is invalid.")
+        params = {"stats": "gameLog", "group": "pitching", "season": season, "gameType": "R"}
+        return f"{TEAM_BASE_URL}/{team_id}/stats?{urlencode(params)}"
 
     @staticmethod
     def _build_people_pitching_hydrate_url(person_ids: Sequence[int], season: int, *, stats_type: str) -> str:
@@ -254,6 +262,18 @@ class MlbStatsApiClient:
                 )
             )
         return results
+
+    def fetch_team_pitching_game_log(self, team_id: int, season: int, *, refresh: bool = False) -> CachedPayload:
+        source_url = self.build_team_pitching_game_log_url(team_id, season)
+        cache_path = self.cache_dir / "team-game-logs" / f"pitching_{season}_{team_id}.json"
+        return self._fetch_cached_payload(
+            cache_path=cache_path,
+            source_url=source_url,
+            start_date=f"{season}-01-01",
+            end_date=f"{season}-12-31",
+            refresh=refresh,
+            validator=self._validate_stats_payload_shape,
+        )
 
     def _fetch_cached_payload(
         self,
