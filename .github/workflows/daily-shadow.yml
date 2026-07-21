@@ -81,12 +81,29 @@ jobs:
           test -n "$feed"
           gh release upload "$SHADOW_TAG" "$feed"
           echo "feed=$feed" >> "$GITHUB_OUTPUT"
+      - name: Seal model-v2 pitching challenger inputs once
+        shell: bash
+        run: |
+          asset="pitching-v2-${{ steps.dates.outputs.target }}.zip"
+          if gh release view "$SHADOW_TAG" --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
+            exit 0
+          fi
+          python -m mlb_predictor snapshot-pitching \
+            --target-date "${{ steps.dates.outputs.target }}" \
+            --cache-dir data/raw-cache \
+            --output-dir data/pitching-shadow
+          mkdir -p data/shadow
+          (cd "data/pitching-shadow/${{ steps.dates.outputs.target }}" && zip -q "$GITHUB_WORKSPACE/data/shadow/$asset" pitching-v2-*.json)
+          gh release upload "$SHADOW_TAG" "data/shadow/$asset"
       - name: Verify draft asset is not anonymously downloadable
         shell: bash
         run: |
-          asset=$(basename "${{ steps.forecast.outputs.feed }}")
-          status=$(curl -L -s -o /dev/null -w "%{http_code}" "https://github.com/${GITHUB_REPOSITORY}/releases/download/${SHADOW_TAG}/${asset}")
-          test "$status" = "404"
+          forecast_asset=$(basename "${{ steps.forecast.outputs.feed }}")
+          pitching_asset="pitching-v2-${{ steps.dates.outputs.target }}.zip"
+          for asset in "$forecast_asset" "$pitching_asset"; do
+            status=$(curl -L -s -o /dev/null -w "%{http_code}" "https://github.com/${GITHUB_REPOSITORY}/releases/download/${SHADOW_TAG}/${asset}")
+            test "$status" = "404"
+          done
       - name: Evaluate current public gate
         shell: bash
         run: |

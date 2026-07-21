@@ -18,6 +18,9 @@ def test_daily_shadow_workflow_contract() -> None:
     assert "gh release upload" in workflow
     assert "actions: write" in workflow
     assert 'gh workflow run pages.yml --ref "$GITHUB_REF_NAME"' in workflow
+    assert "snapshot-pitching" in workflow
+    assert 'asset="pitching-v2-${{ steps.dates.outputs.target }}.zip"' in workflow
+    assert 'grep -Fxq "$asset"' in workflow
     assert "git add" not in workflow
     assert "git commit" not in workflow
 

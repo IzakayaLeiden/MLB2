@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from urllib.parse import parse_qs, urlparse
 
@@ -47,8 +48,50 @@ def test_client_uses_cache_without_network(tmp_path, schedule_payload, monkeypat
 
     assert len(calls) == 1
     assert first[0].from_cache is False
+    assert first[0].fetched_at_utc is not None
+    assert first[0].response_sha256 is not None
     assert second[0].from_cache is True
+    assert second[0].fetched_at_utc == first[0].fetched_at_utc
     assert second[0].payload == schedule_payload
+    assert (tmp_path / "schedule_2025-04-01_2025-04-01.json.meta.json").exists()
+
+
+def test_legacy_cache_has_no_point_in_time_timestamp(tmp_path, schedule_payload, monkeypatch) -> None:
+    cache_path = tmp_path / "schedule_2025-04-01_2025-04-01.json"
+    cache_path.write_text(json.dumps(schedule_payload), encoding="utf-8")
+    client = MlbStatsApiClient(tmp_path)
+    monkeypatch.setattr(client, "_request_json", lambda url: pytest.fail("network must not be used"))
+
+    result = client.fetch_schedule("2025-04-01", "2025-04-01")
+
+    assert result[0].from_cache is True
+    assert result[0].fetched_at_utc is None
+    assert result[0].response_sha256 is not None
+
+
+def test_player_stats_and_boxscore_urls_are_explicit() -> None:
+    stats_url = MlbStatsApiClient.build_player_pitching_stats_url(123, date(2025, 3, 1), date(2025, 4, 1))
+    stats_query = parse_qs(urlparse(stats_url).query)
+    assert urlparse(stats_url).path == "/api/v1/people/123/stats"
+    assert stats_query == {
+        "stats": ["byDateRange"],
+        "group": ["pitching"],
+        "gameType": ["R"],
+        "startDate": ["2025-03-01"],
+        "endDate": ["2025-04-01"],
+    }
+    assert MlbStatsApiClient.build_boxscore_url(456).endswith("/api/v1/game/456/boxscore")
+
+
+def test_generic_stats_cache_records_provenance(tmp_path, monkeypatch) -> None:
+    client = MlbStatsApiClient(tmp_path)
+    monkeypatch.setattr(client, "_request_json", lambda url: {"stats": []})
+
+    result = client.fetch_player_pitching_stats(123, "2025-03-01", "2025-04-01")
+
+    assert result.fetched_at_utc is not None
+    assert result.response_sha256 is not None
+    assert result.cache_path.name == "pitcher_123_2025-03-01_2025-04-01.json"
 
 
 def test_client_does_not_cache_invalid_network_payload(tmp_path, monkeypatch) -> None:

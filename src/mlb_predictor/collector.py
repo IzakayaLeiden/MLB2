@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
@@ -12,6 +13,8 @@ from urllib.request import Request, urlopen
 
 
 API_BASE_URL = "https://statsapi.mlb.com/api/v1/schedule"
+PEOPLE_BASE_URL = "https://statsapi.mlb.com/api/v1/people"
+GAME_BASE_URL = "https://statsapi.mlb.com/api/v1/game"
 
 
 def _parse_date(value: str | date) -> date:
@@ -43,6 +46,8 @@ class CachedPayload:
     payload: dict[str, Any]
     from_cache: bool
     source_url: str
+    fetched_at_utc: str | None = None
+    response_sha256: str | None = None
 
 
 class MlbStatsApiClient:
@@ -72,6 +77,27 @@ class MlbStatsApiClient:
         }
         return f"{API_BASE_URL}?{urlencode(params)}"
 
+    @staticmethod
+    def build_player_pitching_stats_url(player_id: int, start_date: date, end_date: date) -> str:
+        if player_id <= 0:
+            raise ValueError("player_id must be positive.")
+        if start_date > end_date:
+            raise ValueError("start_date must not be after end_date.")
+        params = {
+            "stats": "byDateRange",
+            "group": "pitching",
+            "gameType": "R",
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+        }
+        return f"{PEOPLE_BASE_URL}/{player_id}/stats?{urlencode(params)}"
+
+    @staticmethod
+    def build_boxscore_url(game_id: int) -> str:
+        if game_id <= 0:
+            raise ValueError("game_id must be positive.")
+        return f"{GAME_BASE_URL}/{game_id}/boxscore"
+
     def fetch_schedule(
         self,
         start_date: str | date,
@@ -94,12 +120,15 @@ class MlbStatsApiClient:
                     payload = self._request_json(source_url)
                     self._validate_payload_shape(payload, source_url)
                     self._write_json_atomic(cache_path, payload)
+                    self._write_cache_metadata(cache_path, payload, source_url)
                     from_cache = False
             else:
                 payload = self._request_json(source_url)
                 self._validate_payload_shape(payload, source_url)
                 self._write_json_atomic(cache_path, payload)
+                self._write_cache_metadata(cache_path, payload, source_url)
                 from_cache = False
+            metadata = self._read_cache_metadata(cache_path, payload, source_url)
             results.append(
                 CachedPayload(
                     start_date=chunk_start.isoformat(),
@@ -108,9 +137,83 @@ class MlbStatsApiClient:
                     payload=payload,
                     from_cache=from_cache,
                     source_url=source_url,
+                    fetched_at_utc=metadata.get("fetched_at_utc") if metadata else None,
+                    response_sha256=metadata.get("response_sha256") if metadata else self._payload_sha256(payload),
                 )
             )
         return results
+
+    def fetch_player_pitching_stats(
+        self,
+        player_id: int,
+        start_date: str | date,
+        end_date: str | date,
+        *,
+        refresh: bool = False,
+    ) -> CachedPayload:
+        start = _parse_date(start_date)
+        end = _parse_date(end_date)
+        source_url = self.build_player_pitching_stats_url(player_id, start, end)
+        cache_path = self.cache_dir / "pitchers" / f"pitcher_{player_id}_{start.isoformat()}_{end.isoformat()}.json"
+        return self._fetch_cached_payload(
+            cache_path=cache_path,
+            source_url=source_url,
+            start_date=start.isoformat(),
+            end_date=end.isoformat(),
+            refresh=refresh,
+            validator=self._validate_stats_payload_shape,
+        )
+
+    def fetch_game_boxscore(self, game_id: int, *, refresh: bool = False) -> CachedPayload:
+        source_url = self.build_boxscore_url(game_id)
+        cache_path = self.cache_dir / "boxscores" / f"boxscore_{game_id}.json"
+        return self._fetch_cached_payload(
+            cache_path=cache_path,
+            source_url=source_url,
+            start_date="",
+            end_date="",
+            refresh=refresh,
+            validator=self._validate_boxscore_payload_shape,
+        )
+
+    def _fetch_cached_payload(
+        self,
+        *,
+        cache_path: Path,
+        source_url: str,
+        start_date: str,
+        end_date: str,
+        refresh: bool,
+        validator: Any,
+    ) -> CachedPayload:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        from_cache = False
+        if cache_path.exists() and not refresh:
+            try:
+                payload = json.loads(cache_path.read_text(encoding="utf-8"))
+                validator(payload, source_url)
+                from_cache = True
+            except (json.JSONDecodeError, RuntimeError):
+                payload = self._request_json(source_url)
+                validator(payload, source_url)
+                self._write_json_atomic(cache_path, payload)
+                self._write_cache_metadata(cache_path, payload, source_url)
+        else:
+            payload = self._request_json(source_url)
+            validator(payload, source_url)
+            self._write_json_atomic(cache_path, payload)
+            self._write_cache_metadata(cache_path, payload, source_url)
+        metadata = self._read_cache_metadata(cache_path, payload, source_url)
+        return CachedPayload(
+            start_date=start_date,
+            end_date=end_date,
+            cache_path=cache_path,
+            payload=payload,
+            from_cache=from_cache,
+            source_url=source_url,
+            fetched_at_utc=metadata.get("fetched_at_utc") if metadata else None,
+            response_sha256=metadata.get("response_sha256") if metadata else self._payload_sha256(payload),
+        )
 
     def _request_json(self, url: str) -> dict[str, Any]:
         last_error: Exception | None = None
@@ -137,7 +240,56 @@ class MlbStatsApiClient:
             raise RuntimeError(f"예상하지 못한 일정 응답 구조입니다(dates 누락): {source_url}")
 
     @staticmethod
+    def _validate_stats_payload_shape(payload: dict[str, Any], source_url: str) -> None:
+        if not isinstance(payload.get("stats"), list):
+            raise RuntimeError(f"Unexpected player stats response (stats missing): {source_url}")
+
+    @staticmethod
+    def _validate_boxscore_payload_shape(payload: dict[str, Any], source_url: str) -> None:
+        if not isinstance(payload.get("teams"), dict):
+            raise RuntimeError(f"Unexpected boxscore response (teams missing): {source_url}")
+
+    @staticmethod
+    def _payload_sha256(payload: dict[str, Any]) -> str:
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    @classmethod
+    def _write_cache_metadata(cls, cache_path: Path, payload: dict[str, Any], source_url: str) -> None:
+        metadata = {
+            "schema_version": "mlb-api-cache-metadata-v1",
+            "fetched_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "source_url": source_url,
+            "response_sha256": cls._payload_sha256(payload),
+        }
+        cls._write_json_atomic(cache_path.with_suffix(cache_path.suffix + ".meta.json"), metadata)
+
+    @classmethod
+    def _read_cache_metadata(
+        cls,
+        cache_path: Path,
+        payload: dict[str, Any],
+        source_url: str,
+    ) -> dict[str, Any] | None:
+        metadata_path = cache_path.with_suffix(cache_path.suffix + ".meta.json")
+        if not metadata_path.exists():
+            return None
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if (
+            metadata.get("schema_version") != "mlb-api-cache-metadata-v1"
+            or metadata.get("source_url") != source_url
+            or metadata.get("response_sha256") != cls._payload_sha256(payload)
+            or not isinstance(metadata.get("fetched_at_utc"), str)
+        ):
+            return None
+        return metadata
+
+    @staticmethod
     def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = path.with_suffix(path.suffix + ".tmp")
         temporary_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),

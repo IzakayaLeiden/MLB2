@@ -14,6 +14,7 @@ from .forecasting import create_prediction_feed, grade_prediction_feed, load_fro
 from .gate import evaluate_public_gate
 from .io import read_rows, write_json
 from .normalizer import normalize_future_schedule_payloads
+from .pitching import collect_pregame_pitching_snapshots, write_pregame_pitching_snapshots
 from .pipeline import build_dataset
 from .quality import raise_for_failed_reports, validate_dataset_pair, validate_feature_rows, validate_raw_games
 from .training import train_model_artifacts
@@ -87,6 +88,13 @@ def _parser() -> argparse.ArgumentParser:
     audit.add_argument("--code-revision", required=True)
     audit.add_argument("--bootstrap-iterations", type=int, default=10_000)
     audit.add_argument("--seed", type=int, default=20260721)
+
+    pitching = subparsers.add_parser("snapshot-pitching", help="model-v2용 경기 전 선발투수·불펜 스냅샷을 봉인합니다.")
+    pitching.add_argument("--target-date", required=True)
+    pitching.add_argument("--output-dir", type=Path, default=Path("data/pitching-snapshots"))
+    pitching.add_argument("--cache-dir", type=Path, default=Path("data/pitching-cache"))
+    pitching.add_argument("--created-at-utc")
+    pitching.add_argument("--refresh", action="store_true")
     return parser
 
 
@@ -205,5 +213,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
         return 0
+
+    if args.command == "snapshot-pitching":
+        client = MlbStatsApiClient(args.cache_dir)
+        schedule_payloads = client.fetch_schedule(args.target_date, args.target_date, chunk_days=1, refresh=args.refresh)
+        scheduled_games, skipped = normalize_future_schedule_payloads(
+            [payload.payload for payload in schedule_payloads],
+            target_date=args.target_date,
+        )
+        snapshots = collect_pregame_pitching_snapshots(
+            client=client,
+            scheduled_games=[game for game in scheduled_games if game["forecast_eligible"]],
+            schedule_sources=schedule_payloads,
+            target_date=args.target_date,
+            created_at_utc=args.created_at_utc,
+            refresh=args.refresh,
+        )
+        paths = write_pregame_pitching_snapshots(snapshots, output_dir=args.output_dir)
+        failed_game_ids = [snapshot["game_id"] for snapshot in snapshots if snapshot["quality"]["status"] != "passed"]
+        result = {
+            "paths": [str(path) for path in paths],
+            "snapshot_count": len(snapshots),
+            "quality_status": "passed" if not failed_game_ids else "failed",
+            "failed_game_ids": failed_game_ids,
+            "skipped": [item.to_dict() for item in skipped],
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if not failed_game_ids else 2
 
     raise AssertionError(f"처리되지 않은 명령: {args.command}")

@@ -36,6 +36,8 @@ MLB 정규시즌 홈 승리 확률을 경기 전 데이터만으로 생성하고
 
 이 단계의 선발투수 값은 일정 응답에 기록된 `probablePitcher` 메타데이터입니다. 과거 경기를 사후 조회한 값은 당시 예측 시점의 선발 정보였다고 보장할 수 없으므로 학습 피처로 사용하지 않으며, 투수 성적 피처와 라인업 피처도 아직 포함하지 않습니다.
 
+`model-v2` challenger를 위해서는 별도의 `pregame-pitching-snapshot-v2`를 수집합니다. 이 스냅샷은 API 수집 UTC 시각·원본 URL·응답 SHA-256을 보존하고, 경기 60분 전 이후에 수집된 자료나 당일 경기 결과가 섞인 자료를 거부합니다. 선발투수는 직전 365일 정규시즌의 전날까지 성적만 사용하며, 불펜은 직전 3일 완료 경기의 투구 수와 상대 타자 수만 집계합니다. 이 피처는 아직 동결 `model-v1` 확률에 반영되지 않습니다.
+
 ## 실행
 
 현재 환경에 의존성이 이미 있다면 설치 없이 다음처럼 실행할 수 있습니다.
@@ -52,6 +54,7 @@ python -m mlb_predictor backtest --features data\multi-year\features\pregame_fea
 python -m mlb_predictor forecast --history-games data\runtime\processed\history_games.parquet --model artifacts\model-v1\model-v1.json --target-date 2026-07-21 --output-dir data\shadow
 python -m mlb_predictor grade --feed data\shadow\prediction.json --completed-games data\runtime\processed\games.parquet --output data\shadow\grade.json
 python -m mlb_predictor gate --feeds-dir data\shadow --grades-dir data\shadow --model artifacts\model-v1\model-v1.json --as-of-date 2026-08-21 --output data\shadow\status.json
+python -m mlb_predictor snapshot-pitching --target-date 2026-07-21 --cache-dir data\pitching-cache --output-dir data\pitching-snapshots
 ```
 
 `backtest`의 2025 홀드아웃은 상태 파일로 단회 사용을 강제합니다. 이미 사용된 출력 디렉터리에 다시 실행하면 실패합니다.
@@ -73,6 +76,7 @@ npm test
 ## 자동화
 
 - `.github/workflows/daily-shadow.yml`: 매일 `08:17 America/New_York`, 당일 봉인·전일 채점·draft release 업로드·익명 다운로드 차단 확인
+- 같은 daily workflow가 날짜별 `pitching-v2-YYYY-MM-DD.zip`도 draft release에 한 번만 봉인해 challenger 학습 자료를 축적
 - `.github/workflows/pages.yml`: 역사 검증·동결 모델·커버리지·오류·봉인 시각 안전 검사를 통과한 `latest.json`, 날짜별 아카이브, 모델 요약, 상태를 GitHub Pages에 배포
 - 미래 30일·300경기 성능 검증은 배포와 동시에 계속 누적하며 `status.json`에 기록
 - 운영 안전 검사나 Pages 작업이 실패하면 마지막 정상 공개 피드를 교체하지 않음
