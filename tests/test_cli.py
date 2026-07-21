@@ -108,6 +108,62 @@ def test_validate_remains_an_independent_command(monkeypatch, capsys, tmp_path: 
     }
 
 
+def test_audit_forwards_reproducibility_inputs(monkeypatch, capsys, tmp_path: Path) -> None:
+    features = tmp_path / "features.parquet"
+    games = tmp_path / "games.parquet"
+    exclusions = tmp_path / "exclusions.csv"
+    model_path = tmp_path / "model-v1.json"
+    output = tmp_path / "audit"
+    model = {"model_version": "model-v1"}
+    rows = [{"game_id": 1}]
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "load_frozen_model", lambda path: model)
+    monkeypatch.setattr(cli, "read_rows", lambda path: rows)
+    monkeypatch.setattr(
+        cli,
+        "write_audit_bundle",
+        lambda **kwargs: captured.update(kwargs) or {"schema_version": "model-audit-manifest-v1"},
+    )
+
+    exit_code = cli.main(
+        [
+            "audit",
+            "--features",
+            str(features),
+            "--games",
+            str(games),
+            "--exclusions",
+            str(exclusions),
+            "--model",
+            str(model_path),
+            "--output-dir",
+            str(output),
+            "--code-revision",
+            "abc123",
+            "--bootstrap-iterations",
+            "500",
+            "--seed",
+            "7",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured == {
+        "feature_rows": rows,
+        "features_path": features,
+        "games_path": games,
+        "exclusions_path": exclusions,
+        "model": model,
+        "model_path": model_path,
+        "output_dir": output,
+        "code_revision": "abc123",
+        "iterations": 500,
+        "seed": 7,
+    }
+    assert json.loads(capsys.readouterr().out)["schema_version"] == "model-audit-manifest-v1"
+
+
 class _Report:
     def __init__(self, name: str) -> None:
         self.name = name

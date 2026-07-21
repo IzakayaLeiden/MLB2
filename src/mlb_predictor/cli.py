@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .audit import write_audit_bundle
 from .features import FeatureConfig
 from .backtest import DEFAULT_L2_VALUES, run_backtest
 from .collector import MlbStatsApiClient
@@ -76,6 +77,16 @@ def _parser() -> argparse.ArgumentParser:
     gate.add_argument("--output", type=Path, required=True)
     gate.add_argument("--critical-errors", type=int, default=0)
     gate.add_argument("--high-errors", type=int, default=0)
+
+    audit = subparsers.add_parser("audit", help="경기별 OOF 예측과 날짜 블록 통계 검증 번들을 생성합니다.")
+    audit.add_argument("--features", type=Path, required=True)
+    audit.add_argument("--games", type=Path, required=True)
+    audit.add_argument("--exclusions", type=Path, required=True)
+    audit.add_argument("--model", type=Path, required=True)
+    audit.add_argument("--output-dir", type=Path, required=True)
+    audit.add_argument("--code-revision", required=True)
+    audit.add_argument("--bootstrap-iterations", type=int, default=10_000)
+    audit.add_argument("--seed", type=int, default=20260721)
     return parser
 
 
@@ -176,5 +187,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         write_json(args.output, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["passed"] else 2
+
+    if args.command == "audit":
+        model = load_frozen_model(args.model)
+        feature_rows = read_rows(args.features)
+        manifest = write_audit_bundle(
+            feature_rows=feature_rows,
+            features_path=args.features,
+            games_path=args.games,
+            exclusions_path=args.exclusions,
+            model=model,
+            model_path=args.model,
+            output_dir=args.output_dir,
+            code_revision=args.code_revision,
+            iterations=args.bootstrap_iterations,
+            seed=args.seed,
+        )
+        print(json.dumps(manifest, ensure_ascii=False, indent=2))
+        return 0
 
     raise AssertionError(f"처리되지 않은 명령: {args.command}")
