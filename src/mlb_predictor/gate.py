@@ -63,11 +63,30 @@ def evaluate_public_gate(
         "historical_holdout_passed": bool(model.get("holdout_evaluation", {}).get("passed")),
         "model_is_frozen": bool(model.get("frozen")),
     }
+    passed = all(checks.values())
+    safety_checks = (
+        "coverage_at_least_95_percent",
+        "critical_high_data_errors_zero",
+        "post_start_or_late_seals_zero",
+        "historical_holdout_passed",
+        "model_is_frozen",
+    )
+    safety_passed = all(checks[name] for name in safety_checks)
+    evidence_complete = checks["minimum_30_days"] and checks["minimum_300_graded_games"]
+    if passed:
+        failure_action = None
+    elif not safety_passed:
+        failure_action = "disable_prediction_publication_and_investigate"
+    elif not evidence_complete:
+        failure_action = "continue_future_validation"
+    else:
+        failure_action = "return_to_model_and_feature_improvement"
     return {
         "schema_version": "public-gate-v1",
         "as_of_date": as_of.isoformat(),
-        "passed": all(checks.values()),
-        "public_release_allowed": all(checks.values()),
+        "passed": passed,
+        "public_release_allowed": passed,
+        "prediction_publication_safe": safety_passed,
         "checks": checks,
         "metrics": {
             "elapsed_days": elapsed_days,
@@ -80,7 +99,7 @@ def evaluate_public_gate(
             "high_errors": high_errors,
         },
         "evaluations": evaluations,
-        "failure_action": None if all(checks.values()) else "return_to_model_and_feature_improvement",
+        "failure_action": failure_action,
     }
 
 

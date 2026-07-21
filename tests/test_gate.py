@@ -44,4 +44,17 @@ def test_public_gate_fails_closed_without_prospective_evidence() -> None:
     assert result["checks"]["minimum_30_days"] is False
     assert result["checks"]["minimum_300_graded_games"] is False
     assert result["checks"]["beats_constant_on_both"] is False
-    assert result["failure_action"] == "return_to_model_and_feature_improvement"
+    assert result["failure_action"] == "disable_prediction_publication_and_investigate"
+
+
+def test_public_gate_allows_safe_publication_while_future_evidence_accumulates() -> None:
+    feed = {
+        "target_date_et": "2025-02-01",
+        "quality": {"eligible_games": 15, "sealed_predictions": 15, "late_game_ids": []},
+    }
+
+    result = evaluate_public_gate(feeds=[feed], grades=[], model=model("elo"), as_of_date="2025-02-01")
+
+    assert result["passed"] is False
+    assert result["prediction_publication_safe"] is True
+    assert result["failure_action"] == "continue_future_validation"

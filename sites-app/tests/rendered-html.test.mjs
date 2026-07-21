@@ -25,6 +25,9 @@ test("검증과 방법론 화면을 렌더링한다", async () => {
   const methodology = await (await render("/methodology")).text();
   assert.match(validation, /2025 봉인 홀드아웃/);
   assert.match(validation, /0\.6819/);
+  assert.match(validation, /현재 예측 제공/);
+  assert.doesNotMatch(validation, /활성화하지 않습니다/);
   assert.match(methodology, /Fail-closed/);
   assert.match(methodology, /선발투수 이름은 표시용/);
+  assert.match(methodology, /미래 성능 모니터링/);
 });

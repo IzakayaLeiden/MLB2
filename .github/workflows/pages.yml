@@ -34,18 +34,17 @@ jobs:
           today=$(TZ=America/New_York date +%F)
           python -m mlb_predictor gate --feeds-dir data/shadow --grades-dir data/shadow --model artifacts/model-v1/model-v1.json --as-of-date "$today" --output data/public-gate.json || code=$?
           if [ "${code:-0}" = "2" ]; then
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "future_validation=monitoring" >> "$GITHUB_OUTPUT"
+          elif [ "${code:-0}" -ne "0" ]; then
+            exit "$code"
+          else
+            echo "future_validation=passed" >> "$GITHUB_OUTPUT"
           fi
-          if [ "${code:-0}" -ne "0" ]; then exit "$code"; fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
       - name: Build Pages payload
-        if: steps.gate.outputs.publish == 'true'
         run: python scripts/build_pages_feed.py --feeds-dir data/shadow --gate data/public-gate.json --model-summary artifacts/model-v1/validation-summary.json --output-dir dist/pages
       - uses: actions/configure-pages@v5
-        if: steps.gate.outputs.publish == 'true'
       - uses: actions/upload-pages-artifact@v3
-        if: steps.gate.outputs.publish == 'true'
         with:
           path: dist/pages
 
