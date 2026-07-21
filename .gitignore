@@ -6,4 +6,6 @@ __pycache__/
 data/
 dist/
 build/
+!sites-app/build/
+!sites-app/build/sites-vite-plugin.ts
 *.egg-info/
