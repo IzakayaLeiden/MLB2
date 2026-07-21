@@ -15,6 +15,7 @@ from .gate import evaluate_public_gate
 from .io import read_rows, write_json
 from .normalizer import normalize_future_schedule_payloads
 from .pitching import collect_pregame_pitching_snapshots, write_pregame_pitching_snapshots
+from .pitching_backtest import DEFAULT_V2_L2_VALUES, run_retrospective_pitching_backtest
 from .pipeline import build_dataset
 from .quality import raise_for_failed_reports, validate_dataset_pair, validate_feature_rows, validate_raw_games
 from .training import train_model_artifacts
@@ -95,6 +96,15 @@ def _parser() -> argparse.ArgumentParser:
     pitching.add_argument("--cache-dir", type=Path, default=Path("data/pitching-cache"))
     pitching.add_argument("--created-at-utc")
     pitching.add_argument("--refresh", action="store_true")
+
+    pitching_backtest = subparsers.add_parser("backtest-pitching-v2", help="이전 시즌 선발 성적 challenger를 회고적으로 평가합니다.")
+    pitching_backtest.add_argument("--features", type=Path, required=True)
+    pitching_backtest.add_argument("--output-dir", type=Path, required=True)
+    pitching_backtest.add_argument("--cache-dir", type=Path, default=Path("data/pitching-backtest-cache"))
+    pitching_backtest.add_argument("--l2-values", type=float, nargs="+", default=list(DEFAULT_V2_L2_VALUES))
+    pitching_backtest.add_argument("--bootstrap-iterations", type=int, default=10_000)
+    pitching_backtest.add_argument("--seed", type=int, default=20260721)
+    pitching_backtest.add_argument("--refresh", action="store_true")
     return parser
 
 
@@ -240,5 +250,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if not failed_game_ids else 2
+
+    if args.command == "backtest-pitching-v2":
+        result = run_retrospective_pitching_backtest(
+            feature_rows=read_rows(args.features),
+            client=MlbStatsApiClient(args.cache_dir),
+            output_dir=args.output_dir,
+            refresh=args.refresh,
+            l2_values=args.l2_values,
+            bootstrap_iterations=args.bootstrap_iterations,
+            seed=args.seed,
+        )
+        report = result["report"]
+        print(json.dumps({
+            "selected_candidate": report["selected_candidate"],
+            "development_holdout_metrics": {
+                name: evaluation["metrics"]
+                for name, evaluation in report["development_holdout"].items()
+            },
+            "score_gate_criteria": report["score_gate_criteria"],
+            "retrospective_score_gate_passed": report["retrospective_score_gate_passed"],
+            "promotion_allowed": report["promotion_allowed"],
+            "output_dir": str(args.output_dir),
+        }, ensure_ascii=False, indent=2))
+        return 0
 
     raise AssertionError(f"처리되지 않은 명령: {args.command}")

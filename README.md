@@ -5,6 +5,7 @@ MLB 정규시즌 홈 승리 확률을 경기 전 데이터만으로 생성하고
 공개 저장소: [IzakayaLeiden/MLB2](https://github.com/IzakayaLeiden/MLB2)
 
 외부 검토를 위한 모델 작동 방식, 수식, 검증 결과 및 한계는 [`MODEL_CARD.md`](MODEL_CARD.md)에 정리되어 있습니다.
+선발투수 challenger의 회고 평가와 승격 보류 사유는 [`MODEL_V2_EVALUATION.md`](MODEL_V2_EVALUATION.md)에 정리되어 있습니다.
 정확한 경기별 예측·입력 snapshot·제외 목록·10,000회 날짜 블록 bootstrap 결과는 [model-v1 감사 Release](https://github.com/IzakayaLeiden/MLB2/releases/tag/model-v1-audit-2026-07-21)에서 받을 수 있습니다.
 
 ## 현재 검증 상태 (2026-07-21)

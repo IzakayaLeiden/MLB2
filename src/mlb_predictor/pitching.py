@@ -418,7 +418,7 @@ def write_pregame_pitching_snapshots(
     return written
 
 
-def _smoothed_pitcher_rate(stats: Mapping[str, Any], field: str) -> float:
+def smoothed_pitcher_rate(stats: Mapping[str, Any], field: str) -> float:
     batters_faced = max(0.0, _number(stats.get("batters_faced")))
     observed = max(0.0, _number(stats.get(field)))
     prior = PITCHER_RATE_PRIORS[field]
@@ -439,7 +439,7 @@ def pitching_snapshot_to_features(snapshot: Mapping[str, Any]) -> dict[str, Any]
         stats = starter.get("stats", {}) if isinstance(starter, Mapping) else {}
         missing[side] = int(not starter.get("player_id") or not stats.get("has_history"))
         side_rates[side] = {
-            field: _smoothed_pitcher_rate(stats, field)
+            field: smoothed_pitcher_rate(stats, field)
             for field in PITCHER_RATE_PRIORS
         }
 

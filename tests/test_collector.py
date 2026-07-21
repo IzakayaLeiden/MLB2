@@ -94,6 +94,25 @@ def test_generic_stats_cache_records_provenance(tmp_path, monkeypatch) -> None:
     assert result.cache_path.name == "pitcher_123_2025-03-01_2025-04-01.json"
 
 
+def test_people_season_stats_are_batched_and_cached(tmp_path, monkeypatch) -> None:
+    client = MlbStatsApiClient(tmp_path)
+    calls: list[str] = []
+
+    def fake_request(url: str):
+        calls.append(url)
+        return {"people": []}
+
+    monkeypatch.setattr(client, "_request_json", fake_request)
+    results = client.fetch_people_pitching_season_stats([3, 2, 1], 2024, batch_size=2)
+
+    assert len(results) == 2
+    assert len(calls) == 2
+    first_query = parse_qs(urlparse(calls[0]).query)
+    assert first_query["personIds"] == ["1,2"]
+    assert first_query["hydrate"] == ["stats(group=[pitching],type=[season],season=2024)"]
+    assert all(result.fetched_at_utc for result in results)
+
+
 def test_client_does_not_cache_invalid_network_payload(tmp_path, monkeypatch) -> None:
     client = MlbStatsApiClient(tmp_path)
     monkeypatch.setattr(client, "_request_json", lambda url: {})

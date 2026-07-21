@@ -116,6 +116,8 @@ def _metric_loss(target: np.ndarray, probability: np.ndarray, metric: str) -> np
         return -(target * np.log(clipped) + (1.0 - target) * np.log1p(-clipped))
     if metric == "brier_score":
         return np.square(probability - target)
+    if metric == "error_rate":
+        return ((probability >= 0.5) != target).astype(float)
     raise ValueError(f"지원하지 않는 paired metric입니다: {metric}")
 
 

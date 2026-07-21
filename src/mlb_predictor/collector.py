@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -98,6 +98,19 @@ class MlbStatsApiClient:
             raise ValueError("game_id must be positive.")
         return f"{GAME_BASE_URL}/{game_id}/boxscore"
 
+    @staticmethod
+    def build_people_pitching_season_url(person_ids: Sequence[int], season: int) -> str:
+        unique_ids = sorted(set(int(person_id) for person_id in person_ids))
+        if not unique_ids or any(person_id <= 0 for person_id in unique_ids):
+            raise ValueError("person_ids must contain positive IDs.")
+        if season < 1876:
+            raise ValueError("season is invalid.")
+        params = {
+            "personIds": ",".join(str(person_id) for person_id in unique_ids),
+            "hydrate": f"stats(group=[pitching],type=[season],season={season})",
+        }
+        return f"{PEOPLE_BASE_URL}?{urlencode(params)}"
+
     def fetch_schedule(
         self,
         start_date: str | date,
@@ -176,6 +189,35 @@ class MlbStatsApiClient:
             validator=self._validate_boxscore_payload_shape,
         )
 
+    def fetch_people_pitching_season_stats(
+        self,
+        person_ids: Sequence[int],
+        season: int,
+        *,
+        batch_size: int = 50,
+        refresh: bool = False,
+    ) -> list[CachedPayload]:
+        unique_ids = sorted(set(int(person_id) for person_id in person_ids))
+        if not 1 <= batch_size <= 100:
+            raise ValueError("batch_size must be between 1 and 100.")
+        results: list[CachedPayload] = []
+        for offset in range(0, len(unique_ids), batch_size):
+            batch = unique_ids[offset : offset + batch_size]
+            source_url = self.build_people_pitching_season_url(batch, season)
+            identifier = hashlib.sha256(",".join(str(value) for value in batch).encode("ascii")).hexdigest()[:16]
+            cache_path = self.cache_dir / "people-seasons" / f"pitching_{season}_{identifier}.json"
+            results.append(
+                self._fetch_cached_payload(
+                    cache_path=cache_path,
+                    source_url=source_url,
+                    start_date=f"{season}-01-01",
+                    end_date=f"{season}-12-31",
+                    refresh=refresh,
+                    validator=self._validate_people_payload_shape,
+                )
+            )
+        return results
+
     def _fetch_cached_payload(
         self,
         *,
@@ -248,6 +290,11 @@ class MlbStatsApiClient:
     def _validate_boxscore_payload_shape(payload: dict[str, Any], source_url: str) -> None:
         if not isinstance(payload.get("teams"), dict):
             raise RuntimeError(f"Unexpected boxscore response (teams missing): {source_url}")
+
+    @staticmethod
+    def _validate_people_payload_shape(payload: dict[str, Any], source_url: str) -> None:
+        if not isinstance(payload.get("people"), list):
+            raise RuntimeError(f"Unexpected people response (people missing): {source_url}")
 
     @staticmethod
     def _payload_sha256(payload: dict[str, Any]) -> str:

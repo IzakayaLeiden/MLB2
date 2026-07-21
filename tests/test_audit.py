@@ -143,3 +143,19 @@ def test_writes_hashed_audit_bundle(tmp_path: Path) -> None:
     assert (output / "manifest.json").exists()
     assert (output / "holdout-predictions.csv").exists()
     assert (output / "sha256sums.txt").exists()
+
+
+def test_paired_date_block_bootstrap_supports_accuracy_error_rate() -> None:
+    rows = [
+        {"official_date": "2025-04-01", "home_win": 1, "challenger": 0.6, "baseline": 0.4},
+        {"official_date": "2025-04-02", "home_win": 0, "challenger": 0.4, "baseline": 0.6},
+    ]
+    result = paired_date_block_bootstrap(
+        rows,
+        challenger="challenger",
+        baseline="baseline",
+        metric="error_rate",
+        iterations=100,
+        seed=1,
+    )
+    assert result["point_estimate"] == -1.0
