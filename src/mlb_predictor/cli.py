@@ -121,6 +121,7 @@ def _parser() -> argparse.ArgumentParser:
 
     model_v3 = subparsers.add_parser("backtest-model-v3", help="선발 휴식·예상 이닝 challenger를 회고적으로 평가합니다.")
     model_v3.add_argument("--features", type=Path, required=True)
+    model_v3.add_argument("--games", type=Path, required=True)
     model_v3.add_argument("--output-dir", type=Path, required=True)
     model_v3.add_argument("--cache-dir", type=Path, default=Path("data/pitching-backtest-cache"))
     model_v3.add_argument("--l2-values", type=float, nargs="+", default=list(DEFAULT_V2_L2_VALUES))
@@ -323,6 +324,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "backtest-model-v3":
         result = run_model_v3_backtest(
             feature_rows=read_rows(args.features),
+            completed_games=read_rows(args.games),
             client=MlbStatsApiClient(args.cache_dir),
             output_dir=args.output_dir,
             refresh=args.refresh,

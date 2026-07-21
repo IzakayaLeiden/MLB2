@@ -13,12 +13,16 @@ from .lineup import (
     add_lineup_features,
     collect_current_season_batting_game_logs,
     collect_historical_lineups,
+    collect_prior_season_batting_platoon_stats,
     collect_prior_season_batting_stats,
 )
 from .model_v3_backtest import (
     MODEL_V3_FEATURE_SPECS,
     add_context_features,
     add_interaction_features,
+    add_platoon_features,
+    add_platoon_performance_features,
+    add_recent_starter_form_features,
     add_starter_readiness_features,
 )
 from .normalizer import normalize_future_schedule_payloads, normalize_schedule_payloads
@@ -27,9 +31,10 @@ from .pitching_backtest import (
     collect_current_season_pitching_game_logs,
     collect_prior_season_pitching_stats,
 )
+from .run_strength import add_dynamic_run_strength_features
 
 
-SNAPSHOT_SCHEMA_VERSION = "pregame-model-v3-snapshot-v2"
+SNAPSHOT_SCHEMA_VERSION = "pregame-model-v3-snapshot-v5"
 PROVENANCE_MODE = "verified_point_in_time"
 
 
@@ -291,7 +296,9 @@ def collect_pregame_model_v3_snapshots(
     games = [game for game in scheduled if bool(game.get("forecast_eligible"))]
     if not games:
         return []
-    base_rows = build_forecast_features(list(completed_games), games)
+    history = list(completed_games)
+    base_rows = build_forecast_features(history, games)
+    base_rows = add_dynamic_run_strength_features(base_rows, history)
     season = int(target.year)
     target_seasons = [season]
 
@@ -346,6 +353,13 @@ def collect_pregame_model_v3_snapshots(
         target_seasons=target_seasons,
         refresh=refresh,
     )
+    batting_platoon, batting_platoon_sources = collect_prior_season_batting_platoon_stats(
+        client=client,
+        rows=base_rows,
+        lineups=resolved_lineups,
+        target_seasons=target_seasons,
+        refresh=refresh,
+    )
     rosters, roster_sources = _active_pitcher_rosters(
         client,
         games,
@@ -362,7 +376,21 @@ def collect_pregame_model_v3_snapshots(
     augmented = add_context_features(base_rows)
     augmented = add_rolling_starter_features(augmented, starter_prior, starter_logs)
     augmented = add_starter_readiness_features(augmented, starter_prior, starter_logs)
+    augmented = add_recent_starter_form_features(augmented, starter_logs)
     augmented = add_lineup_features(augmented, resolved_lineups, batting_prior, batting_logs)
+    augmented = add_platoon_features(
+        augmented,
+        resolved_lineups,
+        batting_prior,
+        starter_prior,
+    )
+    augmented = add_platoon_performance_features(
+        augmented,
+        resolved_lineups,
+        batting_prior,
+        batting_platoon,
+        starter_prior,
+    )
     augmented = add_reliever_availability_features(augmented, rosters, reliever_prior, reliever_logs)
     augmented = add_interaction_features(augmented)
     augmented_by_game = {int(row["game_id"]): row for row in augmented}
@@ -375,6 +403,7 @@ def collect_pregame_model_v3_snapshots(
         *starter_log_sources,
         *batting_prior_sources,
         *batting_log_sources,
+        *batting_platoon_sources,
         *roster_sources,
         *reliever_sources,
     ]

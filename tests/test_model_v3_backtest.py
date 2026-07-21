@@ -10,6 +10,9 @@ from mlb_predictor.model_v3_backtest import (
     _predict_lda_season,
     add_context_features,
     add_neutral_context_features,
+    add_platoon_features,
+    add_platoon_performance_features,
+    add_recent_starter_form_features,
     add_interaction_features,
     add_neutral_interaction_features,
     add_starter_readiness_features,
@@ -74,6 +77,106 @@ def test_neutral_context_features_preserve_original_candidate_contract() -> None
 
     assert result["game_id"] == 10
     assert result["recent_offense_difference"] == 0.0
+
+
+def test_recent_starter_form_uses_only_prior_starts() -> None:
+    row = {
+        "season": 2025,
+        "official_date": "2025-04-10",
+        "away_probable_pitcher_id": 22,
+        "home_probable_pitcher_id": 11,
+    }
+    logs = {
+        (2025, 11): [
+            {"date": "2025-04-04", "stats": {"games_started": 1, "batters_faced": 20, "strikeouts": 6, "walks": 1, "earned_runs": 1, "innings_pitched_outs": 18, "pitches_thrown": 90}},
+            {"date": "2025-04-10", "stats": {"games_started": 1, "batters_faced": 20, "strikeouts": 0, "walks": 10, "earned_runs": 10, "innings_pitched_outs": 3, "pitches_thrown": 90}},
+        ],
+        (2025, 22): [
+            {"date": "2025-04-03", "stats": {"games_started": 1, "batters_faced": 20, "strikeouts": 2, "walks": 3, "earned_runs": 4, "innings_pitched_outs": 12, "pitches_thrown": 85}},
+        ],
+    }
+
+    result = add_recent_starter_form_features([row], logs)[0]
+
+    assert result["starter_recent_k_minus_bb_difference"] > 0
+    assert result["starter_recent_earned_run_advantage"] > 0
+    assert result["starter_recent_outs_advantage"] == pytest.approx(2.0)
+    assert result["away_starter_recent_form_missing"] == 0
+    assert result["home_starter_recent_form_missing"] == 0
+
+
+def test_platoon_features_compare_each_lineup_to_opposing_starter_hand() -> None:
+    row = {
+        "game_id": 10,
+        "season": 2025,
+        "away_probable_pitcher_id": 22,
+        "home_probable_pitcher_id": 11,
+    }
+    away_ids = list(range(100, 109))
+    home_ids = list(range(200, 209))
+    batter_stats = {
+        **{(2024, player_id): {"bat_side": "R"} for player_id in away_ids},
+        **{(2024, player_id): {"bat_side": "R"} for player_id in home_ids},
+    }
+    pitcher_stats = {
+        (2024, 11): {"pitch_hand": "L"},
+        (2024, 22): {"pitch_hand": "R"},
+    }
+
+    result = add_platoon_features(
+        [row],
+        {10: {"away_player_ids": away_ids, "home_player_ids": home_ids}},
+        batter_stats,
+        pitcher_stats,
+    )[0]
+
+    assert result["lineup_platoon_advantage"] == -1.0
+    assert result["lineup_same_side_exposure_advantage"] == -1.0
+    assert result["away_lineup_handedness_missing_rate"] == 0.0
+    assert result["home_lineup_handedness_missing_rate"] == 0.0
+
+
+def test_prior_season_platoon_performance_matches_opposing_starter() -> None:
+    row = {
+        "game_id": 10,
+        "season": 2025,
+        "away_probable_pitcher_id": 22,
+        "home_probable_pitcher_id": 11,
+    }
+    away_ids = list(range(100, 109))
+    home_ids = list(range(200, 209))
+    overall = {
+        (2024, player_id): {
+            "has_history": True,
+            "plate_appearances": 100,
+            "at_bats": 90,
+            "hits": 20,
+            "doubles": 4,
+            "triples": 0,
+            "home_runs": 2,
+            "walks": 8,
+            "hit_by_pitch": 1,
+            "sac_flies": 1,
+        }
+        for player_id in [*away_ids, *home_ids]
+    }
+    strong = {**overall[(2024, home_ids[0])], "hits": 40, "home_runs": 8, "walks": 15}
+    platoon = {
+        (2024, player_id): {"vr": strong if player_id in home_ids else overall[(2024, player_id)]}
+        for player_id in [*away_ids, *home_ids]
+    }
+
+    result = add_platoon_performance_features(
+        [row],
+        {10: {"away_player_ids": away_ids, "home_player_ids": home_ids}},
+        overall,
+        platoon,
+        {(2024, 11): {"pitch_hand": "R"}, (2024, 22): {"pitch_hand": "R"}},
+    )[0]
+
+    assert result["lineup_platoon_ops_advantage"] > 0
+    assert result["away_lineup_platoon_stats_missing_rate"] == 0.0
+    assert result["home_lineup_platoon_stats_missing_rate"] == 0.0
 
 
 def test_starter_readiness_ignores_relief_appearances_for_rest() -> None:

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from mlb_predictor.lineup import add_lineup_features, normalize_batter_stats_payload, smoothed_batter_ops
+from mlb_predictor.lineup import (
+    add_lineup_features,
+    normalize_batter_stats_payload,
+    smoothed_batter_ops,
+    smoothed_platoon_ops,
+)
 
 
 def _stats(*, hits: int = 20, doubles: int = 4, triples: int = 0, home_runs: int = 2, walks: int = 8) -> dict:
@@ -29,6 +34,16 @@ def test_normalize_batter_stats_extracts_counting_stats() -> None:
     assert result["hits"] == 4
     assert result["home_runs"] == 1
     assert smoothed_batter_ops(result) > 0.73
+
+
+def test_platoon_ops_is_shrunk_toward_overall_history() -> None:
+    overall = _stats(hits=20, doubles=4, home_runs=2, walks=8)
+    strong_split = _stats(hits=40, doubles=10, home_runs=8, walks=15)
+
+    result = smoothed_platoon_ops(strong_split, overall)
+
+    assert result > smoothed_batter_ops(overall)
+    assert result < 1.5
 
 
 def test_lineup_features_exclude_target_date_batting_log() -> None:

@@ -82,9 +82,12 @@ def collect_prior_season_pitching_stats(
             for person in response.payload.get("people", []):
                 if not isinstance(person, Mapping) or not person.get("id"):
                     continue
-                stats_by_season_player[(stats_season, int(person["id"]))] = normalize_pitcher_stats_payload(
+                normalized = normalize_pitcher_stats_payload(
                     {"stats": person.get("stats", [])}
                 )
+                pitch_hand = person.get("pitchHand", {}) if isinstance(person.get("pitchHand"), Mapping) else {}
+                normalized["pitch_hand"] = pitch_hand.get("code")
+                stats_by_season_player[(stats_season, int(person["id"]))] = normalized
     return stats_by_season_player, sources
 
 

@@ -19,14 +19,20 @@ from .collector import MlbStatsApiClient
 from .evaluation import evaluate_prediction_set
 from .io import write_json, write_rows_csv
 from .lineup import (
+    LEAGUE_OBP_PRIOR,
+    LEAGUE_SLG_PRIOR,
     LINEUP_FEATURE_NAMES,
+    LINEUP_WEIGHTS,
     add_lineup_features,
     add_neutral_lineup_features,
     collect_current_season_batting_game_logs,
     collect_historical_lineups,
+    collect_prior_season_batting_platoon_stats,
     collect_prior_season_batting_stats,
+    smoothed_platoon_ops,
 )
 from .modeling import DEFAULT_FEATURE_SPECS, FeatureSpec, StandardizedLogisticRegression, extract_feature_matrix
+from .pitching import PITCHER_RATE_PRIORS
 from .pitching_backtest import (
     BACKTEST_SEASONS,
     DEFAULT_V2_L2_VALUES,
@@ -38,6 +44,11 @@ from .pitching_backtest import (
     collect_current_season_pitching_game_logs,
     collect_prior_season_pitching_stats,
     collect_team_pitching_game_logs,
+)
+from .run_strength import (
+    RUN_STRENGTH_FEATURE_NAMES,
+    add_dynamic_run_strength_features,
+    add_neutral_run_strength_features,
 )
 
 
@@ -59,6 +70,28 @@ CONTEXT_FEATURE_NAMES = (
     "season_win_pct_signed_square",
     "recent_win_pct_signed_square",
 )
+STARTER_TREND_FEATURE_NAMES = (
+    "starter_recent_k_minus_bb_difference",
+    "starter_recent_earned_run_advantage",
+    "starter_recent_outs_advantage",
+    "starter_recent_pitch_efficiency_advantage",
+    "away_starter_recent_form_missing",
+    "home_starter_recent_form_missing",
+)
+PLATOON_FEATURE_NAMES = (
+    "lineup_platoon_advantage",
+    "lineup_same_side_exposure_advantage",
+    "away_lineup_handedness_missing_rate",
+    "home_lineup_handedness_missing_rate",
+    "away_opposing_starter_hand_missing",
+    "home_opposing_starter_hand_missing",
+)
+PLATOON_PERFORMANCE_FEATURE_NAMES = (
+    "lineup_platoon_ops_advantage",
+    "lineup_platoon_top4_ops_advantage",
+    "away_lineup_platoon_stats_missing_rate",
+    "home_lineup_platoon_stats_missing_rate",
+)
 INTERACTION_FEATURE_NAMES = (
     "elo_signed_square",
     "starter_kbb_expected_innings_interaction",
@@ -71,6 +104,10 @@ MODEL_V3_FEATURE_SPECS = DEFAULT_FEATURE_SPECS + tuple(
     for name in (
         *STARTER_FEATURE_NAMES,
         *CONTEXT_FEATURE_NAMES,
+        *STARTER_TREND_FEATURE_NAMES,
+        *PLATOON_FEATURE_NAMES,
+        *PLATOON_PERFORMANCE_FEATURE_NAMES,
+        *RUN_STRENGTH_FEATURE_NAMES,
         *READINESS_FEATURE_NAMES,
         *LINEUP_FEATURE_NAMES,
         *RELIEVER_FEATURE_NAMES,
@@ -212,6 +249,192 @@ def add_neutral_context_features(
     rows: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     return [dict(row, **{name: 0.0 for name in CONTEXT_FEATURE_NAMES}) for row in rows]
+
+
+def add_recent_starter_form_features(
+    rows: Iterable[Mapping[str, Any]],
+    game_logs: Mapping[tuple[int, int], Sequence[Mapping[str, Any]]],
+    *,
+    window: int = 3,
+) -> list[dict[str, Any]]:
+    augmented: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        season = int(row["season"])
+        official_date = str(row["official_date"])
+        form: dict[str, dict[str, float]] = {}
+        for side in ("away", "home"):
+            pitcher_id = row.get(f"{side}_probable_pitcher_id")
+            starts = [] if pitcher_id is None else [
+                appearance
+                for appearance in game_logs.get((season, int(pitcher_id)), [])
+                if str(appearance["date"]) < official_date
+                and int(appearance.get("stats", {}).get("games_started", 0) or 0) > 0
+            ][-window:]
+            totals = {
+                field: sum(int(appearance.get("stats", {}).get(field, 0) or 0) for appearance in starts)
+                for field in ("batters_faced", "strikeouts", "walks", "earned_runs", "innings_pitched_outs", "pitches_thrown")
+            }
+            batters = float(totals["batters_faced"])
+            prior_batters = 50.0
+            k_rate = (totals["strikeouts"] + PITCHER_RATE_PRIORS["strikeouts"] * prior_batters) / (batters + prior_batters)
+            bb_rate = (totals["walks"] + PITCHER_RATE_PRIORS["walks"] * prior_batters) / (batters + prior_batters)
+            er_rate = (totals["earned_runs"] + PITCHER_RATE_PRIORS["earned_runs"] * prior_batters) / (batters + prior_batters)
+            outs = float(totals["innings_pitched_outs"]) / len(starts) if starts else DEFAULT_EXPECTED_START_OUTS
+            pitches = float(totals["pitches_thrown"])
+            form[side] = {
+                "k_minus_bb": k_rate - bb_rate,
+                "earned_runs": er_rate,
+                "outs": outs,
+                "efficiency": float(totals["innings_pitched_outs"]) / pitches if pitches > 0 else DEFAULT_EXPECTED_START_OUTS / 85.0,
+                "missing": float(not starts),
+            }
+        row.update(
+            {
+                "starter_recent_form_provenance": "past_three_starts_strictly_before_official_date_v1",
+                "starter_recent_k_minus_bb_difference": form["home"]["k_minus_bb"] - form["away"]["k_minus_bb"],
+                "starter_recent_earned_run_advantage": form["away"]["earned_runs"] - form["home"]["earned_runs"],
+                "starter_recent_outs_advantage": (form["home"]["outs"] - form["away"]["outs"]) / 3.0,
+                "starter_recent_pitch_efficiency_advantage": form["home"]["efficiency"] - form["away"]["efficiency"],
+                "away_starter_recent_form_missing": form["away"]["missing"],
+                "home_starter_recent_form_missing": form["home"]["missing"],
+            }
+        )
+        augmented.append(row)
+    return augmented
+
+
+def add_neutral_starter_trend_features(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [dict(row, **{name: 0.0 for name in STARTER_TREND_FEATURE_NAMES}) for row in rows]
+
+
+def add_platoon_features(
+    rows: Iterable[Mapping[str, Any]],
+    lineups: Mapping[int, Mapping[str, Any]],
+    batter_prior_stats: Mapping[tuple[int, int], Mapping[str, Any]],
+    pitcher_prior_stats: Mapping[tuple[int, int], Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    augmented: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        season = int(row["season"])
+        lineup = lineups.get(int(row["game_id"]), {})
+        values: dict[str, dict[str, float]] = {}
+        for side, opposing_side in (("away", "home"), ("home", "away")):
+            pitcher_id = row.get(f"{opposing_side}_probable_pitcher_id")
+            pitcher = pitcher_prior_stats.get((season - 1, int(pitcher_id)), {}) if pitcher_id is not None else {}
+            pitch_hand = str(pitcher.get("pitch_hand") or "")
+            pitch_hand_known = pitch_hand in {"L", "R"}
+            player_ids = [int(value) for value in lineup.get(f"{side}_player_ids", [])][:9]
+            favorable = 0
+            same_side = 0
+            missing = max(0, 9 - len(player_ids))
+            for player_id in player_ids:
+                bat_side = str(batter_prior_stats.get((season - 1, player_id), {}).get("bat_side") or "")
+                if bat_side not in {"L", "R", "S"} or not pitch_hand_known:
+                    missing += 1
+                elif bat_side == "S" or bat_side != pitch_hand:
+                    favorable += 1
+                else:
+                    same_side += 1
+            values[side] = {
+                "favorable_rate": favorable / 9.0,
+                "same_side_rate": same_side / 9.0,
+                "missing_rate": min(missing, 9) / 9.0,
+                "pitcher_hand_missing": float(not pitch_hand_known),
+            }
+        row.update(
+            {
+                "platoon_feature_provenance": "retrospective_roster_handedness_v1",
+                "lineup_platoon_advantage": values["home"]["favorable_rate"] - values["away"]["favorable_rate"],
+                "lineup_same_side_exposure_advantage": values["away"]["same_side_rate"] - values["home"]["same_side_rate"],
+                "away_lineup_handedness_missing_rate": values["away"]["missing_rate"],
+                "home_lineup_handedness_missing_rate": values["home"]["missing_rate"],
+                "away_opposing_starter_hand_missing": values["away"]["pitcher_hand_missing"],
+                "home_opposing_starter_hand_missing": values["home"]["pitcher_hand_missing"],
+            }
+        )
+        augmented.append(row)
+    return augmented
+
+
+def add_neutral_platoon_features(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [dict(row, **{name: 0.0 for name in PLATOON_FEATURE_NAMES}) for row in rows]
+
+
+def add_platoon_performance_features(
+    rows: Iterable[Mapping[str, Any]],
+    lineups: Mapping[int, Mapping[str, Any]],
+    batter_prior_stats: Mapping[tuple[int, int], Mapping[str, Any]],
+    batter_platoon_stats: Mapping[tuple[int, int], Mapping[str, Mapping[str, Any]]],
+    pitcher_prior_stats: Mapping[tuple[int, int], Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    augmented: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        season = int(row["season"])
+        lineup = lineups.get(int(row["game_id"]), {})
+        values: dict[str, dict[str, float]] = {}
+        for side, opposing_side in (("away", "home"), ("home", "away")):
+            pitcher_id = row.get(f"{opposing_side}_probable_pitcher_id")
+            pitcher = pitcher_prior_stats.get((season - 1, int(pitcher_id)), {}) if pitcher_id is not None else {}
+            pitch_hand = str(pitcher.get("pitch_hand") or "")
+            split_code = "vl" if pitch_hand == "L" else "vr" if pitch_hand == "R" else ""
+            player_ids = [int(value) for value in lineup.get(f"{side}_player_ids", [])][:9]
+            ops_values: list[float] = []
+            missing = max(0, 9 - len(player_ids))
+            for player_id in player_ids:
+                overall = batter_prior_stats.get((season - 1, player_id), {})
+                available_splits = batter_platoon_stats.get((season - 1, player_id), {})
+                split = available_splits.get(split_code) if split_code else None
+                missing += int(split is None)
+                ops_values.append(smoothed_platoon_ops(split, overall))
+            if len(ops_values) < 9:
+                ops_values.extend([LEAGUE_OBP_PRIOR + LEAGUE_SLG_PRIOR] * (9 - len(ops_values)))
+            values[side] = {
+                "weighted_ops": sum(value * weight for value, weight in zip(ops_values, LINEUP_WEIGHTS)) / sum(LINEUP_WEIGHTS),
+                "top4_ops": sum(ops_values[:4]) / 4.0,
+                "missing_rate": min(missing, 9) / 9.0,
+            }
+        row.update(
+            {
+                "platoon_performance_provenance": "prior_season_stat_splits_vl_vr_v1",
+                "lineup_platoon_ops_advantage": values["home"]["weighted_ops"] - values["away"]["weighted_ops"],
+                "lineup_platoon_top4_ops_advantage": values["home"]["top4_ops"] - values["away"]["top4_ops"],
+                "away_lineup_platoon_stats_missing_rate": values["away"]["missing_rate"],
+                "home_lineup_platoon_stats_missing_rate": values["home"]["missing_rate"],
+            }
+        )
+        augmented.append(row)
+    return augmented
+
+
+def add_neutral_platoon_performance_features(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        dict(row, **{name: 0.0 for name in PLATOON_PERFORMANCE_FEATURE_NAMES})
+        for row in rows
+    ]
+
+
+def _neutralize_trend_and_platoon(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return add_neutral_run_strength_features(
+        add_neutral_platoon_performance_features(
+            add_neutral_platoon_features(add_neutral_starter_trend_features(rows))
+        )
+    )
+
+
+def add_run_strength_features_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+    run_strength_rows: Mapping[int, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    augmented: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        source = run_strength_rows.get(int(row["game_id"]), {})
+        row.update({name: float(source.get(name, 0.0)) for name in RUN_STRENGTH_FEATURE_NAMES})
+        augmented.append(row)
+    return augmented
 
 
 def add_neutral_interaction_features(
@@ -462,6 +685,14 @@ def evaluate_model_v3_challenger(
         "starter_readiness_lineup_reliever_interactions",
         "starter_readiness_lineup_reliever_context",
         "starter_readiness_lineup_reliever_context_interactions",
+        "starter_readiness_lineup_reliever_trend_platoon",
+        "starter_readiness_lineup_reliever_trend_platoon_interactions",
+        "starter_readiness_lineup_reliever_platoon_ops",
+        "starter_readiness_lineup_reliever_platoon_ops_interactions",
+        "starter_readiness_lineup_reliever_platoon_full",
+        "starter_readiness_lineup_reliever_platoon_full_interactions",
+        "starter_readiness_lineup_reliever_run_strength",
+        "starter_readiness_lineup_reliever_run_strength_interactions",
     }
     for mode in sorted(lda_modes.intersection(augmented_variants)):
         for shrinkage in LDA_SHRINKAGE_VALUES:
@@ -633,6 +864,7 @@ def evaluate_model_v3_challenger(
 def run_model_v3_backtest(
     *,
     feature_rows: Iterable[Mapping[str, Any]],
+    completed_games: Iterable[Mapping[str, Any]],
     client: MlbStatsApiClient,
     output_dir: str | Path,
     refresh: bool = False,
@@ -641,6 +873,8 @@ def run_model_v3_backtest(
     seed: int = 20260721,
 ) -> dict[str, Any]:
     rows = sorted((dict(row) for row in feature_rows), key=lambda row: (str(row["official_date"]), int(row["game_id"])))
+    run_strength_materialized = add_dynamic_run_strength_features(rows, completed_games)
+    run_strength_by_game = {int(row["game_id"]): row for row in run_strength_materialized}
     target_seasons = sorted({int(row["season"]) for row in rows if int(row["season"]) <= DEVELOPMENT_HOLDOUT_SEASON})
     prior_stats, sources = collect_prior_season_pitching_stats(
         client=client,
@@ -682,9 +916,17 @@ def run_model_v3_backtest(
         target_seasons=target_seasons,
         refresh=refresh,
     )
+    batting_platoon_stats, batting_platoon_sources = collect_prior_season_batting_platoon_stats(
+        client=client,
+        rows=rows,
+        lineups=lineups,
+        target_seasons=target_seasons,
+        refresh=refresh,
+    )
     sources.extend(lineup_sources)
     sources.extend(batting_stats_sources)
     sources.extend(batting_log_sources)
+    sources.extend(batting_platoon_sources)
 
     pitcher_rosters, roster_sources = collect_full_season_pitcher_rosters(
         client=client,
@@ -721,39 +963,129 @@ def run_model_v3_backtest(
         reliever_game_logs,
     )
     readiness_lineup_reliever_context = add_context_features(readiness_lineup_reliever)
+    readiness_lineup_reliever_trend = add_neutral_run_strength_features(
+        add_recent_starter_form_features(
+            add_neutral_platoon_performance_features(
+                add_neutral_platoon_features(readiness_lineup_reliever)
+            ),
+            game_logs,
+        ),
+    )
+    readiness_lineup_reliever_platoon = add_neutral_run_strength_features(
+        add_neutral_platoon_performance_features(
+            add_platoon_features(
+                add_neutral_starter_trend_features(readiness_lineup_reliever),
+                lineups,
+                batting_stats,
+                prior_stats,
+            )
+        )
+    )
+    readiness_lineup_reliever_trend_platoon = add_neutral_run_strength_features(
+        add_neutral_platoon_performance_features(
+            add_platoon_features(
+                add_recent_starter_form_features(readiness_lineup_reliever, game_logs),
+                lineups,
+                batting_stats,
+                prior_stats,
+            )
+        )
+    )
+    readiness_lineup_reliever_platoon_ops = add_neutral_run_strength_features(
+        add_platoon_performance_features(
+            add_neutral_platoon_features(add_neutral_starter_trend_features(readiness_lineup_reliever)),
+            lineups,
+            batting_stats,
+            batting_platoon_stats,
+            prior_stats,
+        )
+    )
+    readiness_lineup_reliever_platoon_full = add_platoon_performance_features(
+        readiness_lineup_reliever_platoon,
+        lineups,
+        batting_stats,
+        batting_platoon_stats,
+        prior_stats,
+    )
+    readiness_lineup_reliever_run_strength = add_run_strength_features_from_rows(
+        add_neutral_platoon_performance_features(
+            add_neutral_platoon_features(add_neutral_starter_trend_features(readiness_lineup_reliever))
+        ),
+        run_strength_by_game,
+    )
     report, predictions = evaluate_model_v3_challenger(
         rows,
         rolling,
         {
             "starter_readiness": add_neutral_interaction_features(
-                add_neutral_reliever_features(add_neutral_lineup_features(readiness))
+                _neutralize_trend_and_platoon(
+                    add_neutral_reliever_features(add_neutral_lineup_features(readiness))
+                )
             ),
             "starter_readiness_bullpen": add_neutral_interaction_features(
-                add_neutral_reliever_features(add_neutral_lineup_features(readiness_bullpen))
+                _neutralize_trend_and_platoon(
+                    add_neutral_reliever_features(add_neutral_lineup_features(readiness_bullpen))
+                )
             ),
             "starter_readiness_lineup": add_neutral_interaction_features(
-                add_neutral_reliever_features(readiness_lineup)
+                _neutralize_trend_and_platoon(add_neutral_reliever_features(readiness_lineup))
             ),
             "starter_readiness_lineup_bullpen": add_neutral_interaction_features(
-                add_neutral_reliever_features(readiness_lineup_bullpen)
+                _neutralize_trend_and_platoon(add_neutral_reliever_features(readiness_lineup_bullpen))
             ),
             "starter_readiness_lineup_reliever": add_neutral_interaction_features(
-                readiness_lineup_reliever
+                _neutralize_trend_and_platoon(readiness_lineup_reliever)
             ),
             "starter_readiness_lineup_reliever_bullpen": add_neutral_interaction_features(
-                readiness_lineup_reliever_bullpen
+                _neutralize_trend_and_platoon(readiness_lineup_reliever_bullpen)
             ),
             "starter_readiness_lineup_reliever_interactions": add_interaction_features(
-                readiness_lineup_reliever
+                _neutralize_trend_and_platoon(readiness_lineup_reliever)
             ),
             "starter_readiness_lineup_reliever_bullpen_interactions": add_interaction_features(
-                readiness_lineup_reliever_bullpen
+                _neutralize_trend_and_platoon(readiness_lineup_reliever_bullpen)
             ),
             "starter_readiness_lineup_reliever_context": add_neutral_interaction_features(
-                readiness_lineup_reliever_context
+                _neutralize_trend_and_platoon(readiness_lineup_reliever_context)
             ),
             "starter_readiness_lineup_reliever_context_interactions": add_interaction_features(
-                readiness_lineup_reliever_context
+                _neutralize_trend_and_platoon(readiness_lineup_reliever_context)
+            ),
+            "starter_readiness_lineup_reliever_trend": add_neutral_interaction_features(
+                readiness_lineup_reliever_trend
+            ),
+            "starter_readiness_lineup_reliever_trend_interactions": add_interaction_features(
+                readiness_lineup_reliever_trend
+            ),
+            "starter_readiness_lineup_reliever_platoon": add_neutral_interaction_features(
+                readiness_lineup_reliever_platoon
+            ),
+            "starter_readiness_lineup_reliever_platoon_interactions": add_interaction_features(
+                readiness_lineup_reliever_platoon
+            ),
+            "starter_readiness_lineup_reliever_trend_platoon": add_neutral_interaction_features(
+                readiness_lineup_reliever_trend_platoon
+            ),
+            "starter_readiness_lineup_reliever_trend_platoon_interactions": add_interaction_features(
+                readiness_lineup_reliever_trend_platoon
+            ),
+            "starter_readiness_lineup_reliever_platoon_ops": add_neutral_interaction_features(
+                readiness_lineup_reliever_platoon_ops
+            ),
+            "starter_readiness_lineup_reliever_platoon_ops_interactions": add_interaction_features(
+                readiness_lineup_reliever_platoon_ops
+            ),
+            "starter_readiness_lineup_reliever_platoon_full": add_neutral_interaction_features(
+                readiness_lineup_reliever_platoon_full
+            ),
+            "starter_readiness_lineup_reliever_platoon_full_interactions": add_interaction_features(
+                readiness_lineup_reliever_platoon_full
+            ),
+            "starter_readiness_lineup_reliever_run_strength": add_neutral_interaction_features(
+                readiness_lineup_reliever_run_strength
+            ),
+            "starter_readiness_lineup_reliever_run_strength_interactions": add_interaction_features(
+                readiness_lineup_reliever_run_strength
             ),
         },
         l2_values=l2_values,

@@ -143,6 +143,16 @@ def test_people_batting_urls_use_hitting_group() -> None:
     assert parse_qs(urlparse(game_log_url).query)["hydrate"] == ["stats(group=[hitting],type=[gameLog],season=2025)"]
 
 
+def test_people_batting_platoon_url_requests_left_and_right_splits() -> None:
+    url = MlbStatsApiClient.build_people_batting_platoon_url([2, 1], 2024)
+    query = parse_qs(urlparse(url).query)
+
+    assert query["personIds"] == ["1,2"]
+    assert query["hydrate"] == [
+        "stats(group=[hitting],type=[statSplits],season=2024,sitCodes=[vl,vr])"
+    ]
+
+
 def test_team_game_log_url_is_regular_season_only() -> None:
     url = MlbStatsApiClient.build_team_pitching_game_log_url(119, 2025)
     query = parse_qs(urlparse(url).query)

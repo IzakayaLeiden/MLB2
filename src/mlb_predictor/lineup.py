@@ -127,9 +127,12 @@ def collect_prior_season_batting_stats(
             sources.append(_source_record(response, kind="prior_season_batting", season=stats_season))
             for person in response.payload.get("people", []):
                 if isinstance(person, Mapping) and person.get("id"):
-                    stats[(stats_season, int(person["id"]))] = normalize_batter_stats_payload(
+                    normalized = normalize_batter_stats_payload(
                         {"stats": person.get("stats", [])}
                     )
+                    bat_side = person.get("batSide", {}) if isinstance(person.get("batSide"), Mapping) else {}
+                    normalized["bat_side"] = bat_side.get("code")
+                    stats[(stats_season, int(person["id"]))] = normalized
     return stats, sources
 
 
@@ -182,6 +185,51 @@ def collect_current_season_batting_game_logs(
     return logs, sources
 
 
+def collect_prior_season_batting_platoon_stats(
+    *,
+    client: MlbStatsApiClient,
+    rows: Sequence[Mapping[str, Any]],
+    lineups: Mapping[int, Mapping[str, Any]],
+    target_seasons: Sequence[int],
+    refresh: bool = False,
+) -> tuple[dict[tuple[int, int], dict[str, dict[str, Any]]], list[dict[str, Any]]]:
+    stats: dict[tuple[int, int], dict[str, dict[str, Any]]] = {}
+    sources: list[dict[str, Any]] = []
+    for season in target_seasons:
+        player_ids = sorted(
+            {
+                int(player_id)
+                for row in rows
+                if int(row["season"]) == int(season)
+                for side in ("away", "home")
+                for player_id in lineups.get(int(row["game_id"]), {}).get(f"{side}_player_ids", [])
+            }
+        )
+        if not player_ids:
+            continue
+        stats_season = int(season) - 1
+        for response in client.fetch_people_batting_platoon_stats(player_ids, stats_season, refresh=refresh):
+            sources.append(_source_record(response, kind="prior_season_batting_platoon", season=stats_season))
+            for person in response.payload.get("people", []):
+                if not isinstance(person, Mapping) or not person.get("id"):
+                    continue
+                splits_by_code: dict[str, dict[str, Any]] = {}
+                for group in person.get("stats", []):
+                    if not isinstance(group, Mapping):
+                        continue
+                    for split in group.get("splits", []):
+                        if not isinstance(split, Mapping):
+                            continue
+                        split_metadata = split.get("split", {}) if isinstance(split.get("split"), Mapping) else {}
+                        code = str(split_metadata.get("code") or "")
+                        if code in {"vl", "vr"}:
+                            splits_by_code[code] = normalize_batter_stats_payload(
+                                {"stats": [{"splits": [split]}]}
+                            )
+                stats[(stats_season, int(person["id"]))] = splits_by_code
+    return stats, sources
+
+
 def _combine_batting_stats(
     previous: Mapping[str, Any] | None,
     appearances: Sequence[Mapping[str, Any]],
@@ -226,6 +274,35 @@ def smoothed_batter_ops(stats: Mapping[str, Any]) -> float:
         total_bases + LEAGUE_SLG_PRIOR * BATTING_PRIOR_PLATE_APPEARANCES
     ) / (at_bats + BATTING_PRIOR_PLATE_APPEARANCES)
     return obp + slg
+
+
+def smoothed_platoon_ops(
+    split_stats: Mapping[str, Any] | None,
+    overall_stats: Mapping[str, Any] | None,
+    *,
+    prior_plate_appearances: float = 100.0,
+) -> float:
+    overall = smoothed_batter_ops(overall_stats or {})
+    split = split_stats or {}
+    plate_appearances = float(split.get("plate_appearances", 0) or 0)
+    if plate_appearances <= 0:
+        return overall
+    at_bats = float(split.get("at_bats", 0) or 0)
+    hits = float(split.get("hits", 0) or 0)
+    walks = float(split.get("walks", 0) or 0)
+    hit_by_pitch = float(split.get("hit_by_pitch", 0) or 0)
+    sac_flies = float(split.get("sac_flies", 0) or 0)
+    doubles = float(split.get("doubles", 0) or 0)
+    triples = float(split.get("triples", 0) or 0)
+    home_runs = float(split.get("home_runs", 0) or 0)
+    obp_denominator = at_bats + walks + hit_by_pitch + sac_flies
+    total_bases = hits + doubles + 2.0 * triples + 3.0 * home_runs
+    observed_obp = (hits + walks + hit_by_pitch) / obp_denominator if obp_denominator > 0 else overall / 2.0
+    observed_slg = total_bases / at_bats if at_bats > 0 else overall / 2.0
+    observed_ops = observed_obp + observed_slg
+    return (
+        observed_ops * plate_appearances + overall * prior_plate_appearances
+    ) / (plate_appearances + prior_plate_appearances)
 
 
 def add_lineup_features(

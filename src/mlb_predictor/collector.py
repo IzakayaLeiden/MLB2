@@ -127,6 +127,19 @@ class MlbStatsApiClient:
         return MlbStatsApiClient._build_people_stats_hydrate_url(person_ids, season, group="hitting", stats_type="gameLog")
 
     @staticmethod
+    def build_people_batting_platoon_url(person_ids: Sequence[int], season: int) -> str:
+        unique_ids = sorted(set(int(person_id) for person_id in person_ids))
+        if not unique_ids or any(person_id <= 0 for person_id in unique_ids):
+            raise ValueError("person_ids must contain positive IDs.")
+        if season < 1876:
+            raise ValueError("season is invalid.")
+        params = {
+            "personIds": ",".join(str(person_id) for person_id in unique_ids),
+            "hydrate": f"stats(group=[hitting],type=[statSplits],season={season},sitCodes=[vl,vr])",
+        }
+        return f"{PEOPLE_BASE_URL}?{urlencode(params)}"
+
+    @staticmethod
     def build_team_pitching_game_log_url(team_id: int, season: int) -> str:
         if team_id <= 0 or season < 1876:
             raise ValueError("team_id or season is invalid.")
@@ -363,6 +376,35 @@ class MlbStatsApiClient:
             batch_size=batch_size,
             refresh=refresh,
         )
+
+    def fetch_people_batting_platoon_stats(
+        self,
+        person_ids: Sequence[int],
+        season: int,
+        *,
+        batch_size: int = 100,
+        refresh: bool = False,
+    ) -> list[CachedPayload]:
+        unique_ids = sorted(set(int(person_id) for person_id in person_ids))
+        if not 1 <= batch_size <= 100:
+            raise ValueError("batch_size must be between 1 and 100.")
+        results: list[CachedPayload] = []
+        for offset in range(0, len(unique_ids), batch_size):
+            batch = unique_ids[offset : offset + batch_size]
+            source_url = self.build_people_batting_platoon_url(batch, season)
+            identifier = hashlib.sha256(",".join(str(value) for value in batch).encode("ascii")).hexdigest()[:16]
+            cache_path = self.cache_dir / "people-batting-platoon" / f"hitting_{season}_{identifier}.json"
+            results.append(
+                self._fetch_cached_payload(
+                    cache_path=cache_path,
+                    source_url=source_url,
+                    start_date=f"{season}-01-01",
+                    end_date=f"{season}-12-31",
+                    refresh=refresh,
+                    validator=self._validate_people_payload_shape,
+                )
+            )
+        return results
 
     def _fetch_people_batting_batches(
         self,
