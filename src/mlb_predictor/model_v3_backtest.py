@@ -9,11 +9,15 @@ import numpy as np
 
 from .audit import generate_historical_audit_rows, paired_date_block_bootstrap
 from .bullpen_backtest import (
+    PROBABILISTIC_RELIEVER_FEATURE_NAMES,
     RELIEVER_FEATURE_NAMES,
+    add_neutral_probabilistic_reliever_features,
     add_neutral_reliever_features,
+    add_probabilistic_reliever_features,
     add_reliever_availability_features,
     collect_full_season_pitcher_rosters,
     collect_reliever_pitching_data,
+    ensure_probabilistic_reliever_feature_values,
 )
 from .collector import MlbStatsApiClient
 from .evaluation import evaluate_prediction_set
@@ -75,6 +79,7 @@ BLEND_FEATURE_MODES = {
     "starter_readiness_lineup_reliever_schedule_interactions",
     "starter_readiness_lineup_reliever_venue_interactions",
     "starter_readiness_lineup_reliever_fatigue_interactions",
+    "starter_readiness_lineup_reliever_schedule_probabilistic_interactions",
 }
 READINESS_FEATURE_NAMES = (
     "starter_rest_days_difference",
@@ -131,6 +136,7 @@ MODEL_V3_FEATURE_SPECS = DEFAULT_FEATURE_SPECS + tuple(
         *READINESS_FEATURE_NAMES,
         *LINEUP_FEATURE_NAMES,
         *RELIEVER_FEATURE_NAMES,
+        *PROBABILISTIC_RELIEVER_FEATURE_NAMES,
         *INTERACTION_FEATURE_NAMES,
     )
 )
@@ -455,10 +461,12 @@ def add_neutral_platoon_performance_features(rows: Iterable[Mapping[str, Any]]) 
 
 
 def _neutralize_trend_and_platoon(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    return add_neutral_schedule_context_features(
-        add_neutral_run_strength_features(
-            add_neutral_platoon_performance_features(
-                add_neutral_platoon_features(add_neutral_starter_trend_features(rows))
+    return add_neutral_probabilistic_reliever_features(
+        add_neutral_schedule_context_features(
+            add_neutral_run_strength_features(
+                add_neutral_platoon_performance_features(
+                    add_neutral_platoon_features(add_neutral_starter_trend_features(rows))
+                )
             )
         )
     )
@@ -667,7 +675,9 @@ def evaluate_model_v3_challenger(
     seed: int = 20260721,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     augmented_variants = {
-        mode: ensure_schedule_context_feature_values(rows)
+        mode: ensure_probabilistic_reliever_feature_values(
+            ensure_schedule_context_feature_values(rows)
+        )
         for mode, rows in augmented_variants.items()
     }
     candidate_configs = [
@@ -1119,6 +1129,24 @@ def run_model_v3_backtest(
         _neutralize_trend_and_platoon(readiness_lineup_reliever),
         games,
     )
+    readiness_lineup_reliever_probabilistic = add_probabilistic_reliever_features(
+        add_neutral_schedule_context_features(
+            add_neutral_run_strength_features(
+                add_neutral_platoon_performance_features(
+                    add_neutral_platoon_features(
+                        add_neutral_starter_trend_features(readiness_lineup_reliever)
+                    )
+                )
+            )
+        ),
+        pitcher_rosters,
+        reliever_prior_stats,
+        reliever_game_logs,
+    )
+    readiness_lineup_reliever_schedule_probabilistic = add_schedule_context_features(
+        readiness_lineup_reliever_probabilistic,
+        games,
+    )
     readiness_lineup_reliever_venue = select_schedule_context_feature_block(
         readiness_lineup_reliever_schedule,
         VENUE_CONTEXT_FEATURE_NAMES,
@@ -1212,6 +1240,12 @@ def run_model_v3_backtest(
             ),
             "starter_readiness_lineup_reliever_fatigue_interactions": add_interaction_features(
                 readiness_lineup_reliever_fatigue
+            ),
+            "starter_readiness_lineup_reliever_probabilistic_interactions": add_interaction_features(
+                readiness_lineup_reliever_probabilistic
+            ),
+            "starter_readiness_lineup_reliever_schedule_probabilistic_interactions": add_interaction_features(
+                readiness_lineup_reliever_schedule_probabilistic
             ),
         },
         l2_values=l2_values,

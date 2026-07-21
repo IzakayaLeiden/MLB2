@@ -6,7 +6,11 @@ import math
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from .bullpen_backtest import add_reliever_availability_features, collect_reliever_pitching_data
+from .bullpen_backtest import (
+    add_probabilistic_reliever_features,
+    add_reliever_availability_features,
+    collect_reliever_pitching_data,
+)
 from .collector import CachedPayload, MlbStatsApiClient
 from .features import build_forecast_features
 from .lineup import (
@@ -35,7 +39,7 @@ from .run_strength import add_dynamic_run_strength_features
 from .schedule_context import add_schedule_context_features, add_schedule_context_interactions
 
 
-SNAPSHOT_SCHEMA_VERSION = "pregame-model-v3-snapshot-v6"
+SNAPSHOT_SCHEMA_VERSION = "pregame-model-v3-snapshot-v7"
 PROVENANCE_MODE = "verified_point_in_time"
 
 
@@ -394,6 +398,12 @@ def collect_pregame_model_v3_snapshots(
         starter_prior,
     )
     augmented = add_reliever_availability_features(augmented, rosters, reliever_prior, reliever_logs)
+    augmented = add_probabilistic_reliever_features(
+        augmented,
+        rosters,
+        reliever_prior,
+        reliever_logs,
+    )
     augmented = add_interaction_features(augmented)
     augmented = add_schedule_context_interactions(augmented)
     augmented_by_game = {int(row["game_id"]): row for row in augmented}

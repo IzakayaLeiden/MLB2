@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import math
 from typing import Any, Iterable, Mapping, Sequence
 
 from .collector import CachedPayload, MlbStatsApiClient
@@ -12,6 +13,13 @@ RELIEVER_FEATURE_NAMES = (
     "bullpen_core_quality_advantage",
     "bullpen_core_fatigue_advantage",
     "bullpen_core_unavailable_count_advantage",
+)
+PROBABILISTIC_RELIEVER_FEATURE_NAMES = (
+    "bullpen_expected_available_core_advantage",
+    "bullpen_available_quality_advantage",
+    "bullpen_high_leverage_availability_advantage",
+    "bullpen_back_to_back_risk_advantage",
+    "bullpen_available_quality_leverage_interaction",
 )
 
 
@@ -188,33 +196,62 @@ def _reliever_state(
             + len(relief_appearances) * 0.25
         )
         pitches = {1: 0.0, 2: 0.0, 3: 0.0}
+        exact_pitches = {1: 0.0, 2: 0.0, 3: 0.0}
         appearance_days: set[int] = set()
         for appearance in relief_appearances:
             days_ago = (target - date.fromisoformat(str(appearance["date"]))).days
             if 1 <= days_ago <= 3:
                 appearance_days.add(days_ago)
                 thrown = float(appearance.get("stats", {}).get("pitches_thrown", 0) or 0)
+                exact_pitches[days_ago] += thrown
                 for window in (1, 2, 3):
                     if days_ago <= window:
                         pitches[window] += thrown
         fatigue = min(3.0, pitches[1] / 25.0 + pitches[2] / 50.0 + pitches[3] / 90.0)
         unavailable = float(pitches[1] >= 25 or pitches[2] >= 40 or {1, 2}.issubset(appearance_days))
+        back_to_back = float({1, 2}.issubset(appearance_days))
+        three_in_three = float({1, 2, 3}.issubset(appearance_days))
+        workload = (
+            exact_pitches[1] / 30.0
+            + exact_pitches[2] / 60.0
+            + exact_pitches[3] / 100.0
+            + 0.75 * back_to_back
+            + 0.75 * three_in_three
+        )
+        availability_probability = max(0.05, min(1.0, math.exp(-workload)))
         candidates.append(
             {
                 "role_score": role_score,
                 "quality": k_minus_bb,
                 "fatigue": fatigue,
                 "unavailable": unavailable,
+                "availability_probability": availability_probability,
+                "back_to_back_risk": max(back_to_back, three_in_three),
             }
         )
     core = sorted(candidates, key=lambda item: (-item["role_score"], -item["quality"]))[:CORE_RELIEVER_COUNT]
     missing = CORE_RELIEVER_COUNT - len(core)
+    role_total = sum(max(item["role_score"], 1.0) for item in core)
     return {
         "quality": sum(item["quality"] for item in core) / CORE_RELIEVER_COUNT,
         "fatigue": sum(item["fatigue"] for item in core) / CORE_RELIEVER_COUNT,
         "unavailable_count": sum(item["unavailable"] for item in core),
         "known_count": float(len(core)),
         "missing_count": float(missing),
+        "expected_available_core": sum(item["availability_probability"] for item in core),
+        "available_quality": sum(
+            item["quality"] * item["availability_probability"] for item in core
+        ) / CORE_RELIEVER_COUNT,
+        "high_leverage_availability": (
+            sum(
+                item["availability_probability"] * max(item["role_score"], 1.0)
+                for item in core
+            )
+            / role_total
+            if role_total > 0
+            else 0.0
+        ),
+        "back_to_back_risk": sum(item["back_to_back_risk"] for item in core),
     }
 
 
@@ -265,3 +302,78 @@ def add_neutral_reliever_features(rows: Iterable[Mapping[str, Any]]) -> list[dic
         }
         for row in rows
     ]
+
+
+def add_probabilistic_reliever_features(
+    rows: Iterable[Mapping[str, Any]],
+    rosters: Mapping[tuple[int, int], Sequence[int]],
+    prior_stats: Mapping[tuple[int, int], Mapping[str, Any]],
+    game_logs: Mapping[tuple[int, int], Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    augmented: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        season = int(row["season"])
+        official_date = str(row["official_date"])
+        states: dict[str, dict[str, float]] = {}
+        for side in ("away", "home"):
+            team_id = int(row[f"{side}_team_id"])
+            states[side] = _reliever_state(
+                season=season,
+                team_id=team_id,
+                target_date=official_date,
+                pitcher_ids=rosters.get((season, team_id), []),
+                prior_stats=prior_stats,
+                game_logs=game_logs,
+            )
+        available_quality_advantage = (
+            states["home"]["available_quality"] - states["away"]["available_quality"]
+        )
+        average_starter_innings = (
+            float(row["away_starter_expected_innings"])
+            + float(row["home_starter_expected_innings"])
+        ) / 2.0
+        row.update(
+            {
+                "probabilistic_reliever_provenance": "past_exact_daily_pitch_load_v1",
+                "bullpen_expected_available_core_advantage": (
+                    states["home"]["expected_available_core"]
+                    - states["away"]["expected_available_core"]
+                ),
+                "bullpen_available_quality_advantage": available_quality_advantage,
+                "bullpen_high_leverage_availability_advantage": (
+                    states["home"]["high_leverage_availability"]
+                    - states["away"]["high_leverage_availability"]
+                ),
+                "bullpen_back_to_back_risk_advantage": (
+                    states["away"]["back_to_back_risk"]
+                    - states["home"]["back_to_back_risk"]
+                ),
+                "bullpen_available_quality_leverage_interaction": (
+                    available_quality_advantage * max(0.0, 9.0 - average_starter_innings)
+                ),
+            }
+        )
+        augmented.append(row)
+    return augmented
+
+
+def add_neutral_probabilistic_reliever_features(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        dict(row, **{name: 0.0 for name in PROBABILISTIC_RELIEVER_FEATURE_NAMES})
+        for row in rows
+    ]
+
+
+def ensure_probabilistic_reliever_feature_values(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        for name in PROBABILISTIC_RELIEVER_FEATURE_NAMES:
+            row.setdefault(name, 0.0)
+        output.append(row)
+    return output

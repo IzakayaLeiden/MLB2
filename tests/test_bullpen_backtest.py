@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from mlb_predictor.bullpen_backtest import add_reliever_availability_features
+from mlb_predictor.bullpen_backtest import (
+    add_probabilistic_reliever_features,
+    add_reliever_availability_features,
+)
 
 
 def _prior(*, strikeouts: int = 30, walks: int = 10, saves: int = 2, holds: int = 5) -> dict:
@@ -89,3 +92,40 @@ def test_reliever_availability_excludes_same_date_and_starter_appearances() -> N
 
     assert noisy["bullpen_core_fatigue_advantage"] == pytest.approx(baseline["bullpen_core_fatigue_advantage"])
     assert noisy["bullpen_core_unavailable_count_advantage"] == baseline["bullpen_core_unavailable_count_advantage"]
+
+
+def test_probabilistic_availability_penalizes_heavy_recent_workload() -> None:
+    row = {
+        "season": 2025,
+        "official_date": "2025-04-10",
+        "home_team_id": 1,
+        "away_team_id": 2,
+        "home_starter_expected_innings": 5.0,
+        "away_starter_expected_innings": 5.0,
+    }
+    home_ids = [101, 102, 103, 104]
+    away_ids = [201, 202, 203, 204]
+    rosters = {(2025, 1): home_ids, (2025, 2): away_ids}
+    prior = {
+        (2024, player_id): _prior(saves=10, holds=5)
+        for player_id in home_ids + away_ids
+    }
+    logs = {
+        **{
+            (2025, player_id): [
+                _appearance("2025-04-08", 1, pitches=20),
+                _appearance("2025-04-09", 1, pitches=30),
+            ]
+            for player_id in home_ids
+        },
+        **{
+            (2025, player_id): [_appearance("2025-04-07", 2, pitches=10)]
+            for player_id in away_ids
+        },
+    }
+
+    result = add_probabilistic_reliever_features([row], rosters, prior, logs)[0]
+
+    assert result["bullpen_expected_available_core_advantage"] < 0.0
+    assert result["bullpen_high_leverage_availability_advantage"] < 0.0
+    assert result["bullpen_back_to_back_risk_advantage"] < 0.0
