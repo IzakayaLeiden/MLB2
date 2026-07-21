@@ -95,12 +95,34 @@ jobs:
           mkdir -p data/shadow
           (cd "data/pitching-shadow/${{ steps.dates.outputs.target }}" && zip -q "$GITHUB_WORKSPACE/data/shadow/$asset" pitching-v2-*.json)
           gh release upload "$SHADOW_TAG" "data/shadow/$asset"
+      - name: Seal model-v3 point-in-time challenger inputs once
+        shell: bash
+        run: |
+          asset="model-v3-${{ steps.dates.outputs.target }}.zip"
+          if gh release view "$SHADOW_TAG" --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
+            exit 0
+          fi
+          target_dir="data/model-v3-shadow/${{ steps.dates.outputs.target }}"
+          mkdir -p "$target_dir" data/shadow
+          set +e
+          python -m mlb_predictor snapshot-model-v3 \
+            --history-games data/runtime/processed/history_games.parquet \
+            --target-date "${{ steps.dates.outputs.target }}" \
+            --cache-dir data/raw-cache \
+            --output-dir data/model-v3-shadow \
+            --refresh > "$target_dir/run.json"
+          code=$?
+          set -e
+          if [ "$code" -gt 2 ]; then exit "$code"; fi
+          (cd "$target_dir" && zip -q "$GITHUB_WORKSPACE/data/shadow/$asset" ./*.json)
+          gh release upload "$SHADOW_TAG" "data/shadow/$asset"
       - name: Verify draft asset is not anonymously downloadable
         shell: bash
         run: |
           forecast_asset=$(basename "${{ steps.forecast.outputs.feed }}")
           pitching_asset="pitching-v2-${{ steps.dates.outputs.target }}.zip"
-          for asset in "$forecast_asset" "$pitching_asset"; do
+          model_v3_asset="model-v3-${{ steps.dates.outputs.target }}.zip"
+          for asset in "$forecast_asset" "$pitching_asset" "$model_v3_asset"; do
             status=$(curl -L -s -o /dev/null -w "%{http_code}" "https://github.com/${GITHUB_REPOSITORY}/releases/download/${SHADOW_TAG}/${asset}")
             test "$status" = "404"
           done

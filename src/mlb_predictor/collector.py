@@ -79,6 +79,17 @@ class MlbStatsApiClient:
         return f"{API_BASE_URL}?{urlencode(params)}"
 
     @staticmethod
+    def build_schedule_lineups_url(start_date: date, end_date: date) -> str:
+        params = {
+            "sportId": 1,
+            "gameType": "R",
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+            "hydrate": "probablePitcher,team,venue,lineups",
+        }
+        return f"{API_BASE_URL}?{urlencode(params)}"
+
+    @staticmethod
     def build_player_pitching_stats_url(player_id: int, start_date: date, end_date: date) -> str:
         if player_id <= 0:
             raise ValueError("player_id must be positive.")
@@ -108,6 +119,14 @@ class MlbStatsApiClient:
         return MlbStatsApiClient._build_people_pitching_hydrate_url(person_ids, season, stats_type="gameLog")
 
     @staticmethod
+    def build_people_batting_season_url(person_ids: Sequence[int], season: int) -> str:
+        return MlbStatsApiClient._build_people_stats_hydrate_url(person_ids, season, group="hitting", stats_type="season")
+
+    @staticmethod
+    def build_people_batting_game_log_url(person_ids: Sequence[int], season: int) -> str:
+        return MlbStatsApiClient._build_people_stats_hydrate_url(person_ids, season, group="hitting", stats_type="gameLog")
+
+    @staticmethod
     def build_team_pitching_game_log_url(team_id: int, season: int) -> str:
         if team_id <= 0 or season < 1876:
             raise ValueError("team_id or season is invalid.")
@@ -115,15 +134,41 @@ class MlbStatsApiClient:
         return f"{TEAM_BASE_URL}/{team_id}/stats?{urlencode(params)}"
 
     @staticmethod
+    def build_team_roster_url(team_id: int, season: int, *, roster_type: str = "fullSeason") -> str:
+        if team_id <= 0 or season < 1876:
+            raise ValueError("team_id or season is invalid.")
+        if roster_type not in {"fullSeason", "active"}:
+            raise ValueError("roster_type is invalid.")
+        params = {"rosterType": roster_type, "season": season}
+        return f"{TEAM_BASE_URL}/{team_id}/roster?{urlencode(params)}"
+
+    @staticmethod
     def _build_people_pitching_hydrate_url(person_ids: Sequence[int], season: int, *, stats_type: str) -> str:
+        return MlbStatsApiClient._build_people_stats_hydrate_url(
+            person_ids,
+            season,
+            group="pitching",
+            stats_type=stats_type,
+        )
+
+    @staticmethod
+    def _build_people_stats_hydrate_url(
+        person_ids: Sequence[int],
+        season: int,
+        *,
+        group: str,
+        stats_type: str,
+    ) -> str:
         unique_ids = sorted(set(int(person_id) for person_id in person_ids))
         if not unique_ids or any(person_id <= 0 for person_id in unique_ids):
             raise ValueError("person_ids must contain positive IDs.")
         if season < 1876:
             raise ValueError("season is invalid.")
+        if group not in {"pitching", "hitting"} or stats_type not in {"season", "gameLog"}:
+            raise ValueError("group or stats_type is invalid.")
         params = {
             "personIds": ",".join(str(person_id) for person_id in unique_ids),
-            "hydrate": f"stats(group=[pitching],type=[{stats_type}],season={season})",
+            "hydrate": f"stats(group=[{group}],type=[{stats_type}],season={season})",
         }
         return f"{PEOPLE_BASE_URL}?{urlencode(params)}"
 
@@ -168,6 +213,30 @@ class MlbStatsApiClient:
                     source_url=source_url,
                     fetched_at_utc=metadata.get("fetched_at_utc") if metadata else None,
                     response_sha256=metadata.get("response_sha256") if metadata else self._payload_sha256(payload),
+                )
+            )
+        return results
+
+    def fetch_schedule_lineups(
+        self,
+        start_date: str | date,
+        end_date: str | date,
+        *,
+        chunk_days: int = 31,
+        refresh: bool = False,
+    ) -> list[CachedPayload]:
+        results: list[CachedPayload] = []
+        for chunk_start, chunk_end in iter_date_chunks(start_date, end_date, chunk_days):
+            cache_path = self.cache_dir / "lineup-schedules" / f"lineups_{chunk_start.isoformat()}_{chunk_end.isoformat()}.json"
+            source_url = self.build_schedule_lineups_url(chunk_start, chunk_end)
+            results.append(
+                self._fetch_cached_payload(
+                    cache_path=cache_path,
+                    source_url=source_url,
+                    start_date=chunk_start.isoformat(),
+                    end_date=chunk_end.isoformat(),
+                    refresh=refresh,
+                    validator=self._validate_payload_shape,
                 )
             )
         return results
@@ -263,6 +332,73 @@ class MlbStatsApiClient:
             )
         return results
 
+    def fetch_people_batting_season_stats(
+        self,
+        person_ids: Sequence[int],
+        season: int,
+        *,
+        batch_size: int = 100,
+        refresh: bool = False,
+    ) -> list[CachedPayload]:
+        return self._fetch_people_batting_batches(
+            person_ids,
+            season,
+            stats_type="season",
+            batch_size=batch_size,
+            refresh=refresh,
+        )
+
+    def fetch_people_batting_game_logs(
+        self,
+        person_ids: Sequence[int],
+        season: int,
+        *,
+        batch_size: int = 100,
+        refresh: bool = False,
+    ) -> list[CachedPayload]:
+        return self._fetch_people_batting_batches(
+            person_ids,
+            season,
+            stats_type="gameLog",
+            batch_size=batch_size,
+            refresh=refresh,
+        )
+
+    def _fetch_people_batting_batches(
+        self,
+        person_ids: Sequence[int],
+        season: int,
+        *,
+        stats_type: str,
+        batch_size: int,
+        refresh: bool,
+    ) -> list[CachedPayload]:
+        unique_ids = sorted(set(int(person_id) for person_id in person_ids))
+        if not 1 <= batch_size <= 100:
+            raise ValueError("batch_size must be between 1 and 100.")
+        results: list[CachedPayload] = []
+        for offset in range(0, len(unique_ids), batch_size):
+            batch = unique_ids[offset : offset + batch_size]
+            source_url = (
+                self.build_people_batting_season_url(batch, season)
+                if stats_type == "season"
+                else self.build_people_batting_game_log_url(batch, season)
+            )
+            identifier = hashlib.sha256(",".join(str(value) for value in batch).encode("ascii")).hexdigest()[:16]
+            cache_dir = "people-batting-seasons" if stats_type == "season" else "people-batting-game-logs"
+            cache_path = self.cache_dir / cache_dir / f"hitting_{season}_{identifier}.json"
+            results.append(
+                self._fetch_cached_payload(
+                    cache_path=cache_path,
+                    source_url=source_url,
+                    start_date=f"{season}-01-01",
+                    end_date=f"{season}-12-31",
+                    refresh=refresh,
+                    validator=self._validate_people_payload_shape,
+                )
+            )
+        return results
+
     def fetch_team_pitching_game_log(self, team_id: int, season: int, *, refresh: bool = False) -> CachedPayload:
         source_url = self.build_team_pitching_game_log_url(team_id, season)
         cache_path = self.cache_dir / "team-game-logs" / f"pitching_{season}_{team_id}.json"
@@ -273,6 +409,30 @@ class MlbStatsApiClient:
             end_date=f"{season}-12-31",
             refresh=refresh,
             validator=self._validate_stats_payload_shape,
+        )
+
+    def fetch_team_full_season_roster(self, team_id: int, season: int, *, refresh: bool = False) -> CachedPayload:
+        source_url = self.build_team_roster_url(team_id, season)
+        cache_path = self.cache_dir / "team-rosters" / f"roster_{season}_{team_id}.json"
+        return self._fetch_cached_payload(
+            cache_path=cache_path,
+            source_url=source_url,
+            start_date=f"{season}-01-01",
+            end_date=f"{season}-12-31",
+            refresh=refresh,
+            validator=self._validate_roster_payload_shape,
+        )
+
+    def fetch_team_active_roster(self, team_id: int, season: int, *, refresh: bool = False) -> CachedPayload:
+        source_url = self.build_team_roster_url(team_id, season, roster_type="active")
+        cache_path = self.cache_dir / "active-team-rosters" / f"roster_{season}_{team_id}.json"
+        return self._fetch_cached_payload(
+            cache_path=cache_path,
+            source_url=source_url,
+            start_date=f"{season}-01-01",
+            end_date=f"{season}-12-31",
+            refresh=refresh,
+            validator=self._validate_roster_payload_shape,
         )
 
     def _fetch_cached_payload(
@@ -352,6 +512,11 @@ class MlbStatsApiClient:
     def _validate_people_payload_shape(payload: dict[str, Any], source_url: str) -> None:
         if not isinstance(payload.get("people"), list):
             raise RuntimeError(f"Unexpected people response (people missing): {source_url}")
+
+    @staticmethod
+    def _validate_roster_payload_shape(payload: dict[str, Any], source_url: str) -> None:
+        if not isinstance(payload.get("roster"), list):
+            raise RuntimeError(f"Unexpected roster response (roster missing): {source_url}")
 
     @staticmethod
     def _payload_sha256(payload: dict[str, Any]) -> str:

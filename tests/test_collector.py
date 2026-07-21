@@ -34,6 +34,22 @@ def test_schedule_url_has_explicit_regular_season_contract() -> None:
     assert query["hydrate"] == ["probablePitcher,team,venue"]
 
 
+def test_lineup_schedule_url_requests_lineups_without_changing_base_contract() -> None:
+    url = MlbStatsApiClient.build_schedule_lineups_url(date(2025, 4, 1), date(2025, 4, 2))
+    query = parse_qs(urlparse(url).query)
+    assert query["sportId"] == ["1"]
+    assert query["gameType"] == ["R"]
+    assert query["hydrate"] == ["probablePitcher,team,venue,lineups"]
+
+
+def test_active_roster_url_is_distinct_from_retrospective_full_season_roster() -> None:
+    active = parse_qs(urlparse(MlbStatsApiClient.build_team_roster_url(119, 2026, roster_type="active")).query)
+    retrospective = parse_qs(urlparse(MlbStatsApiClient.build_team_roster_url(119, 2026)).query)
+
+    assert active["rosterType"] == ["active"]
+    assert retrospective["rosterType"] == ["fullSeason"]
+
+
 def test_client_uses_cache_without_network(tmp_path, schedule_payload, monkeypatch) -> None:
     client = MlbStatsApiClient(tmp_path)
     calls: list[str] = []
@@ -120,11 +136,24 @@ def test_people_game_log_url_uses_game_log_hydration() -> None:
     assert query["hydrate"] == ["stats(group=[pitching],type=[gameLog],season=2025)"]
 
 
+def test_people_batting_urls_use_hitting_group() -> None:
+    season_url = MlbStatsApiClient.build_people_batting_season_url([2, 1], 2024)
+    game_log_url = MlbStatsApiClient.build_people_batting_game_log_url([2, 1], 2025)
+    assert parse_qs(urlparse(season_url).query)["hydrate"] == ["stats(group=[hitting],type=[season],season=2024)"]
+    assert parse_qs(urlparse(game_log_url).query)["hydrate"] == ["stats(group=[hitting],type=[gameLog],season=2025)"]
+
+
 def test_team_game_log_url_is_regular_season_only() -> None:
     url = MlbStatsApiClient.build_team_pitching_game_log_url(119, 2025)
     query = parse_qs(urlparse(url).query)
     assert urlparse(url).path == "/api/v1/teams/119/stats"
     assert query == {"stats": ["gameLog"], "group": ["pitching"], "season": ["2025"], "gameType": ["R"]}
+
+
+def test_team_roster_url_uses_full_season_roster() -> None:
+    url = MlbStatsApiClient.build_team_roster_url(119, 2025)
+    assert urlparse(url).path == "/api/v1/teams/119/roster"
+    assert parse_qs(urlparse(url).query) == {"rosterType": ["fullSeason"], "season": ["2025"]}
 
 
 def test_client_does_not_cache_invalid_network_payload(tmp_path, monkeypatch) -> None:

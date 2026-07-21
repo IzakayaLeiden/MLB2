@@ -20,6 +20,10 @@ def test_daily_shadow_workflow_contract() -> None:
     assert 'gh workflow run pages.yml --ref "$GITHUB_REF_NAME"' in workflow
     assert "snapshot-pitching" in workflow
     assert 'asset="pitching-v2-${{ steps.dates.outputs.target }}.zip"' in workflow
+    assert "snapshot-model-v3" in workflow
+    assert 'asset="model-v3-${{ steps.dates.outputs.target }}.zip"' in workflow
+    assert "data/runtime/processed/history_games.parquet" in workflow
+    assert "--refresh > \"$target_dir/run.json\"" in workflow
     assert 'grep -Fxq "$asset"' in workflow
     assert "git add" not in workflow
     assert "git commit" not in workflow

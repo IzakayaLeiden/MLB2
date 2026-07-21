@@ -13,6 +13,8 @@ from .collector import MlbStatsApiClient
 from .forecasting import create_prediction_feed, grade_prediction_feed, load_frozen_model
 from .gate import evaluate_public_gate
 from .io import read_rows, write_json
+from .model_v3_backtest import run_model_v3_backtest
+from .model_v3_snapshot import collect_pregame_model_v3_snapshots, write_pregame_model_v3_snapshots
 from .normalizer import normalize_future_schedule_payloads
 from .pitching import collect_pregame_pitching_snapshots, write_pregame_pitching_snapshots
 from .pitching_backtest import DEFAULT_V2_L2_VALUES, run_retrospective_pitching_backtest
@@ -97,6 +99,17 @@ def _parser() -> argparse.ArgumentParser:
     pitching.add_argument("--created-at-utc")
     pitching.add_argument("--refresh", action="store_true")
 
+    model_v3_snapshot = subparsers.add_parser(
+        "snapshot-model-v3",
+        help="model-v3용 선발·라인업·active roster·불펜 피처를 경기 전 봉인합니다.",
+    )
+    model_v3_snapshot.add_argument("--history-games", type=Path, required=True)
+    model_v3_snapshot.add_argument("--target-date", required=True)
+    model_v3_snapshot.add_argument("--output-dir", type=Path, default=Path("data/model-v3-snapshots"))
+    model_v3_snapshot.add_argument("--cache-dir", type=Path, default=Path("data/model-v3-snapshot-cache"))
+    model_v3_snapshot.add_argument("--created-at-utc")
+    model_v3_snapshot.add_argument("--refresh", action="store_true")
+
     pitching_backtest = subparsers.add_parser("backtest-pitching-v2", help="이전 시즌 선발 성적 challenger를 회고적으로 평가합니다.")
     pitching_backtest.add_argument("--features", type=Path, required=True)
     pitching_backtest.add_argument("--output-dir", type=Path, required=True)
@@ -105,6 +118,15 @@ def _parser() -> argparse.ArgumentParser:
     pitching_backtest.add_argument("--bootstrap-iterations", type=int, default=10_000)
     pitching_backtest.add_argument("--seed", type=int, default=20260721)
     pitching_backtest.add_argument("--refresh", action="store_true")
+
+    model_v3 = subparsers.add_parser("backtest-model-v3", help="선발 휴식·예상 이닝 challenger를 회고적으로 평가합니다.")
+    model_v3.add_argument("--features", type=Path, required=True)
+    model_v3.add_argument("--output-dir", type=Path, required=True)
+    model_v3.add_argument("--cache-dir", type=Path, default=Path("data/pitching-backtest-cache"))
+    model_v3.add_argument("--l2-values", type=float, nargs="+", default=list(DEFAULT_V2_L2_VALUES))
+    model_v3.add_argument("--bootstrap-iterations", type=int, default=10_000)
+    model_v3.add_argument("--seed", type=int, default=20260721)
+    model_v3.add_argument("--refresh", action="store_true")
     return parser
 
 
@@ -251,8 +273,55 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if not failed_game_ids else 2
 
+    if args.command == "snapshot-model-v3":
+        snapshots = collect_pregame_model_v3_snapshots(
+            client=MlbStatsApiClient(args.cache_dir),
+            completed_games=read_rows(args.history_games),
+            target_date=args.target_date,
+            created_at_utc=args.created_at_utc,
+            refresh=args.refresh,
+        )
+        paths = write_pregame_model_v3_snapshots(snapshots, output_dir=args.output_dir)
+        failed_game_ids = [
+            int(snapshot["game_id"])
+            for snapshot in snapshots
+            if snapshot["quality"]["status"] != "passed"
+        ]
+        result = {
+            "paths": [str(path) for path in paths],
+            "snapshot_count": len(snapshots),
+            "quality_status": "passed" if snapshots and not failed_game_ids else "failed",
+            "failed_game_ids": failed_game_ids,
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["quality_status"] == "passed" else 2
+
     if args.command == "backtest-pitching-v2":
         result = run_retrospective_pitching_backtest(
+            feature_rows=read_rows(args.features),
+            client=MlbStatsApiClient(args.cache_dir),
+            output_dir=args.output_dir,
+            refresh=args.refresh,
+            l2_values=args.l2_values,
+            bootstrap_iterations=args.bootstrap_iterations,
+            seed=args.seed,
+        )
+        report = result["report"]
+        print(json.dumps({
+            "selected_candidate": report["selected_candidate"],
+            "development_holdout_metrics": {
+                name: evaluation["metrics"]
+                for name, evaluation in report["development_holdout"].items()
+            },
+            "score_gate_criteria": report["score_gate_criteria"],
+            "retrospective_score_gate_passed": report["retrospective_score_gate_passed"],
+            "promotion_allowed": report["promotion_allowed"],
+            "output_dir": str(args.output_dir),
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "backtest-model-v3":
+        result = run_model_v3_backtest(
             feature_rows=read_rows(args.features),
             client=MlbStatsApiClient(args.cache_dir),
             output_dir=args.output_dir,
