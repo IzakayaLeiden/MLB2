@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -93,3 +94,5 @@ jobs:
           python -m mlb_predictor gate --feeds-dir data/shadow --grades-dir data/shadow --model artifacts/model-v1/model-v1.json --as-of-date "${{ steps.dates.outputs.target }}" --output "$status" || code=$?
           if [ "${code:-0}" -gt 2 ]; then exit "$code"; fi
           gh release upload "$SHADOW_TAG" "$status" --clobber
+      - name: Request Pages gate recheck
+        run: gh workflow run pages.yml --ref "$GITHUB_REF_NAME"

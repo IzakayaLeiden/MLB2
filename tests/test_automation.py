@@ -16,6 +16,8 @@ def test_daily_shadow_workflow_contract() -> None:
     assert 'test "$status" = "404"' in workflow
     assert "existing=$(find" in workflow
     assert "gh release upload" in workflow
+    assert "actions: write" in workflow
+    assert 'gh workflow run pages.yml --ref "$GITHUB_REF_NAME"' in workflow
     assert "git add" not in workflow
     assert "git commit" not in workflow
 
@@ -26,6 +28,8 @@ def test_pages_workflow_preserves_last_good_feed_on_failed_gate() -> None:
     assert "needs.build.outputs.publish == 'true'" in workflow
     assert "actions/deploy-pages@v4" in workflow
     assert "dist/pages" in workflow
+    assert "contents: write" in workflow
+    assert "workflow_run:" not in workflow
 
 
 def test_pages_builder_refuses_failed_gate(tmp_path) -> None:
