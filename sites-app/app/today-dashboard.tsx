@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { predictionDisplay } from "../lib/prediction-display.mjs";
 
 type Team = { id: number; name: string; abbreviation?: string; probable_pitcher?: string | null };
 type Diagnostics = { elo_home_win_probability: number; home_elo: number; away_elo: number; home_recent_win_pct: number; away_recent_win_pct: number; home_rest_days: number; away_rest_days: number; data_through_date: string | null };
@@ -37,22 +38,25 @@ function monogram(team: Team) {
   if (team.name.includes("Padres")) return "P";
   return team.name.trim().slice(0, 1).toUpperCase();
 }
-function homeProbabilityLabel(team: Team) {
-  return ({ "Detroit Tigers": "디트로이트", "Minnesota Twins": "미네소타", "Chicago Cubs": "시카고 컵스" } as Record<string, string>)[team.name] || teamLabel(team);
-}
-
 function GameRow({ prediction }: { prediction: Prediction }) {
   const [open, setOpen] = useState(false);
-  const percent = prediction.home_win_probability * 100;
+  const display = predictionDisplay(prediction.home_win_probability);
+  const homePercent = display.homeWinProbability * 100;
+  const awayPercent = display.awayWinProbability * 100;
+  const favoredPercent = display.favoredProbability * 100;
+  const favoredTeam = display.favoredSide === "home" ? prediction.home_team : display.favoredSide === "away" ? prediction.away_team : null;
+  const favoredSideLabel = display.favoredSide === "home" ? "홈" : display.favoredSide === "away" ? "원정" : null;
+  const favoriteLabel = favoredTeam ? `${teamLabel(favoredTeam)} ${favoredSideLabel} 우세` : "우열 없음";
   return (
     <article className="game-entry">
       <div className="game-row">
         <div className="team away-team"><span className="monogram" aria-hidden="true">{monogram(prediction.away_team)}</span><div><h3>{teamLabel(prediction.away_team)}</h3><p><span>선발</span> {prediction.away_team.probable_pitcher || "미정"}</p></div></div>
         <div className="game-meta"><strong>{timeLabel(prediction.game_start_utc)}</strong><span>{prediction.venue.name || "구장 미정"}</span></div>
         <div className="team home-team"><span className="monogram" aria-hidden="true">{monogram(prediction.home_team)}</span><div><h3>{teamLabel(prediction.home_team)}</h3><p><span>선발</span> {prediction.home_team.probable_pitcher || "미정"}</p></div></div>
-        <div className="probability" aria-label={`${teamLabel(prediction.home_team)} 홈 승리 확률 ${percent.toFixed(1)}퍼센트`}>
-          <span>{homeProbabilityLabel(prediction.home_team)} 홈 승리</span><strong>{percent.toFixed(1)}%</strong>
-          <div className="probability-track" aria-hidden="true"><i style={{ width: `${percent}%` }} /></div>
+        <div className={`probability probability-${display.favoredSide}`} aria-label={`예상 우세 ${favoriteLabel}, 승리 확률 ${favoredPercent.toFixed(1)}퍼센트. 원정 승리 ${awayPercent.toFixed(1)}퍼센트, 홈 승리 ${homePercent.toFixed(1)}퍼센트`}>
+          <span>예상 우세팀</span><b title={favoredTeam ? teamLabel(favoredTeam) : undefined}>{favoriteLabel}</b><strong>{favoredPercent.toFixed(1)}%</strong>
+          <div className="probability-split" aria-hidden="true"><small>원정 {awayPercent.toFixed(1)}%</small><small>홈 {homePercent.toFixed(1)}%</small></div>
+          <div className="probability-track" aria-hidden="true"><i style={{ width: `${homePercent}%` }} /></div>
         </div>
         <button className="expand-button" type="button" aria-expanded={open} aria-controls={`details-${prediction.game_id}`} onClick={() => setOpen((value) => !value)}>{open ? "⌃" : "⌄"}<span className="sr-only">경기 근거 {open ? "접기" : "펼치기"}</span></button>
       </div>
@@ -92,7 +96,7 @@ export function TodayDashboard() {
         <div><h1>오늘의 MLB 경기</h1><p>{dateLabel(targetDate)}</p></div>
         <div className="date-controls" aria-label="경기 날짜 선택"><button type="button" onClick={() => { setLoading(true); setTargetDate((date) => shiftDate(date, -1)); }} aria-label="이전 날짜">‹</button><span>▣&nbsp; {dateLabel(targetDate, true)}</span><button type="button" onClick={() => { setLoading(true); setTargetDate((date) => shiftDate(date, 1)); }} aria-label="다음 날짜">›</button></div>
       </section>
-      <div className="data-standard">▱&nbsp; 데이터 기준 {updated} ET · {feed?.model_version || "model-v1"} · 홈 승리 확률</div>
+      <div className="data-standard">▱&nbsp; 데이터 기준 {updated} ET · {feed?.model_version || "model-v1"} · 예상 우세팀 확률</div>
       {!loading && result?.available && <div className={`validation-progress ${validation?.state === "passed" ? "is-passed" : ""}`} role="status">
         <b>{validation?.historical_passed === false ? "역사 검증 상태 확인 중" : "과거 데이터 검증 완료"}</b>
         <span>{validation?.state === "passed" ? "미래 검증 완료" : validation?.state === "unknown" ? "미래 검증 상태 확인 중" : `미래 검증 진행 중 · ${validation?.elapsed_days ?? 0}/${validation?.required_days ?? 30}일 · ${validation?.graded_games ?? 0}/${validation?.required_games ?? 300}경기`}</span>

@@ -47,8 +47,12 @@ a { color: inherit; text-decoration: none; }
 .home-team { padding-left:20px; }
 .probability { padding-left:25px; text-align:center; }
 .probability > span { display:block; font-weight:750; font-size:17px; }
-.probability > strong { display:block; color:var(--red); font:700 43px Georgia, serif; line-height:1.05; margin:3px 0 8px; }
-.probability-track { height:8px; background:#cbd0d8; border-radius:4px; overflow:hidden; position:relative; }
+.probability > b { display:block; margin-top:2px; color:var(--navy); font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.probability > strong { display:block; color:var(--red); font:700 38px Georgia, serif; line-height:1.05; margin:1px 0 3px; }
+.probability-away > strong { color:var(--navy); }
+.probability-even > strong { color:var(--muted); }
+.probability-split { display:flex; justify-content:space-between; gap:8px; margin-bottom:4px; color:#43506a; font-size:11px; font-weight:700; }
+.probability-track { height:8px; background:var(--navy); border-radius:4px; overflow:hidden; position:relative; }
 .probability-track::after { content:""; position:absolute; left:50%; top:-2px; width:1px; height:12px; background:white; }
 .probability-track i { display:block; margin-left:auto; height:100%; background:var(--red); }
 .expand-button { border:0; background:transparent; cursor:pointer; font-size:28px; width:42px; height:50px; }
@@ -142,7 +146,9 @@ a { color: inherit; text-decoration: none; }
   .game-meta span { font-size:12px; }
   .probability { grid-column:2; grid-row:2; align-self:stretch; border-left:1px solid #bfc7d2; padding:4px 0 0 14px; text-align:left; }
   .probability > span { color:var(--red); font-size:12px; line-height:1.2; max-width:90px; }
-  .probability > strong { font-size:26px; margin:2px 0; }
+  .probability > b { max-width:96px; font-size:11px; }
+  .probability > strong { font-size:25px; margin:1px 0; }
+  .probability-split { display:none; }
   .probability-track { display:none; }
   .expand-button { grid-column:3; grid-row:1 / span 2; font-size:22px; width:24px; }
   .game-details { padding:12px; }
