@@ -100,6 +100,14 @@ class MlbStatsApiClient:
 
     @staticmethod
     def build_people_pitching_season_url(person_ids: Sequence[int], season: int) -> str:
+        return MlbStatsApiClient._build_people_pitching_hydrate_url(person_ids, season, stats_type="season")
+
+    @staticmethod
+    def build_people_pitching_game_log_url(person_ids: Sequence[int], season: int) -> str:
+        return MlbStatsApiClient._build_people_pitching_hydrate_url(person_ids, season, stats_type="gameLog")
+
+    @staticmethod
+    def _build_people_pitching_hydrate_url(person_ids: Sequence[int], season: int, *, stats_type: str) -> str:
         unique_ids = sorted(set(int(person_id) for person_id in person_ids))
         if not unique_ids or any(person_id <= 0 for person_id in unique_ids):
             raise ValueError("person_ids must contain positive IDs.")
@@ -107,7 +115,7 @@ class MlbStatsApiClient:
             raise ValueError("season is invalid.")
         params = {
             "personIds": ",".join(str(person_id) for person_id in unique_ids),
-            "hydrate": f"stats(group=[pitching],type=[season],season={season})",
+            "hydrate": f"stats(group=[pitching],type=[{stats_type}],season={season})",
         }
         return f"{PEOPLE_BASE_URL}?{urlencode(params)}"
 
@@ -206,6 +214,35 @@ class MlbStatsApiClient:
             source_url = self.build_people_pitching_season_url(batch, season)
             identifier = hashlib.sha256(",".join(str(value) for value in batch).encode("ascii")).hexdigest()[:16]
             cache_path = self.cache_dir / "people-seasons" / f"pitching_{season}_{identifier}.json"
+            results.append(
+                self._fetch_cached_payload(
+                    cache_path=cache_path,
+                    source_url=source_url,
+                    start_date=f"{season}-01-01",
+                    end_date=f"{season}-12-31",
+                    refresh=refresh,
+                    validator=self._validate_people_payload_shape,
+                )
+            )
+        return results
+
+    def fetch_people_pitching_game_logs(
+        self,
+        person_ids: Sequence[int],
+        season: int,
+        *,
+        batch_size: int = 50,
+        refresh: bool = False,
+    ) -> list[CachedPayload]:
+        unique_ids = sorted(set(int(person_id) for person_id in person_ids))
+        if not 1 <= batch_size <= 100:
+            raise ValueError("batch_size must be between 1 and 100.")
+        results: list[CachedPayload] = []
+        for offset in range(0, len(unique_ids), batch_size):
+            batch = unique_ids[offset : offset + batch_size]
+            source_url = self.build_people_pitching_game_log_url(batch, season)
+            identifier = hashlib.sha256(",".join(str(value) for value in batch).encode("ascii")).hexdigest()[:16]
+            cache_path = self.cache_dir / "people-game-logs" / f"pitching_{season}_{identifier}.json"
             results.append(
                 self._fetch_cached_payload(
                     cache_path=cache_path,

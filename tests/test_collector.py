@@ -113,6 +113,13 @@ def test_people_season_stats_are_batched_and_cached(tmp_path, monkeypatch) -> No
     assert all(result.fetched_at_utc for result in results)
 
 
+def test_people_game_log_url_uses_game_log_hydration() -> None:
+    url = MlbStatsApiClient.build_people_pitching_game_log_url([2, 1], 2025)
+    query = parse_qs(urlparse(url).query)
+    assert query["personIds"] == ["1,2"]
+    assert query["hydrate"] == ["stats(group=[pitching],type=[gameLog],season=2025)"]
+
+
 def test_client_does_not_cache_invalid_network_payload(tmp_path, monkeypatch) -> None:
     client = MlbStatsApiClient(tmp_path)
     monkeypatch.setattr(client, "_request_json", lambda url: {})

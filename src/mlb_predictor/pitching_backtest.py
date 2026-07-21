@@ -86,6 +86,53 @@ def collect_prior_season_pitching_stats(
     return stats_by_season_player, sources
 
 
+def collect_current_season_pitching_game_logs(
+    *,
+    client: MlbStatsApiClient,
+    rows: Sequence[Mapping[str, Any]],
+    target_seasons: Sequence[int],
+    refresh: bool = False,
+) -> tuple[dict[tuple[int, int], list[dict[str, Any]]], list[dict[str, Any]]]:
+    logs: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    sources: list[dict[str, Any]] = []
+    for season in target_seasons:
+        ids = sorted(
+            {
+                int(pitcher_id)
+                for row in rows
+                if int(row["season"]) == int(season)
+                for pitcher_id in (row.get("away_probable_pitcher_id"), row.get("home_probable_pitcher_id"))
+                if pitcher_id is not None
+            }
+        )
+        responses = client.fetch_people_pitching_game_logs(ids, int(season), refresh=refresh)
+        for response in responses:
+            sources.append(
+                {
+                    "stats_season": int(season),
+                    "stats_type": "gameLog",
+                    "cache_path": str(response.cache_path),
+                    "fetched_at_utc": response.fetched_at_utc,
+                    "source_url": response.source_url,
+                    "response_sha256": response.response_sha256,
+                }
+            )
+            for person in response.payload.get("people", []):
+                if not isinstance(person, Mapping) or not person.get("id"):
+                    continue
+                splits: list[dict[str, Any]] = []
+                for group in person.get("stats", []):
+                    if not isinstance(group, Mapping):
+                        continue
+                    for split in group.get("splits", []):
+                        if not isinstance(split, Mapping) or not split.get("date"):
+                            continue
+                        normalized = normalize_pitcher_stats_payload({"stats": [{"splits": [split]}]})
+                        splits.append({"date": str(split["date"]), "stats": normalized})
+                logs[(int(season), int(person["id"]))] = sorted(splits, key=lambda item: item["date"])
+    return logs, sources
+
+
 def add_prior_season_starter_features(
     rows: Iterable[Mapping[str, Any]],
     stats_by_season_player: Mapping[tuple[int, int], Mapping[str, Any]],
@@ -124,6 +171,71 @@ def add_prior_season_starter_features(
     return augmented
 
 
+def add_rolling_starter_features(
+    rows: Iterable[Mapping[str, Any]],
+    prior_stats: Mapping[tuple[int, int], Mapping[str, Any]],
+    game_logs: Mapping[tuple[int, int], Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    combined_stats: dict[tuple[int, int, str], dict[str, Any]] = {}
+    for source_row in rows:
+        season = int(source_row["season"])
+        official_date = str(source_row["official_date"])
+        for side in ("away", "home"):
+            pitcher_id = source_row.get(f"{side}_probable_pitcher_id")
+            if pitcher_id is None:
+                continue
+            key = (season, int(pitcher_id), official_date)
+            if key in combined_stats:
+                continue
+            previous = prior_stats.get((season - 1, int(pitcher_id)), {})
+            totals = {
+                "has_history": bool(previous.get("has_history")),
+                "batters_faced": int(previous.get("batters_faced", 0)),
+                "strikeouts": int(previous.get("strikeouts", 0)),
+                "walks": int(previous.get("walks", 0)),
+                "home_runs": int(previous.get("home_runs", 0)),
+                "earned_runs": int(previous.get("earned_runs", 0)),
+            }
+            for appearance in game_logs.get((season, int(pitcher_id)), []):
+                if str(appearance["date"]) >= official_date:
+                    break
+                stats = appearance["stats"]
+                totals["has_history"] = True
+                for field in ("batters_faced", "strikeouts", "walks", "home_runs", "earned_runs"):
+                    totals[field] += int(stats.get(field, 0))
+            combined_stats[key] = totals
+
+    augmented: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
+        season = int(row["season"])
+        rates: dict[str, dict[str, float]] = {}
+        missing: dict[str, int] = {}
+        for side in ("away", "home"):
+            pitcher_id = row.get(f"{side}_probable_pitcher_id")
+            stats = combined_stats.get((season, int(pitcher_id), str(row["official_date"]))) if pitcher_id is not None else None
+            materialized = stats or {"has_history": False, "batters_faced": 0}
+            missing[side] = int(not materialized.get("has_history"))
+            rates[side] = {field: smoothed_pitcher_rate(materialized, field) for field in PITCHER_RATE_PRIORS}
+        row.update(
+            {
+                "pitching_feature_provenance": "retrospective_prior_plus_current_game_log_v1",
+                "pitching_stats_through_policy": "strictly_before_official_date",
+                "starter_identity_point_in_time_verified": False,
+                "starter_k_minus_bb_rate_difference": (
+                    rates["home"]["strikeouts"] - rates["home"]["walks"]
+                    - rates["away"]["strikeouts"] + rates["away"]["walks"]
+                ),
+                "starter_earned_run_rate_advantage": rates["away"]["earned_runs"] - rates["home"]["earned_runs"],
+                "starter_home_run_rate_advantage": rates["away"]["home_runs"] - rates["home"]["home_runs"],
+                "away_starter_history_missing": missing["away"],
+                "home_starter_history_missing": missing["home"],
+            }
+        )
+        augmented.append(row)
+    return augmented
+
+
 def _predict_season(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -141,28 +253,40 @@ def _predict_season(
 
 def evaluate_retrospective_starter_challenger(
     base_rows: Sequence[Mapping[str, Any]],
-    augmented_rows: Sequence[Mapping[str, Any]],
+    augmented_variants: Mapping[str, Sequence[Mapping[str, Any]]],
     *,
     l2_values: Sequence[float] = DEFAULT_V2_L2_VALUES,
     bootstrap_iterations: int = 10_000,
     seed: int = 20260721,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    candidate_rows: dict[float, list[dict[str, Any]]] = {float(l2): [] for l2 in l2_values}
-    for l2 in candidate_rows:
+    candidate_rows: dict[tuple[str, float], list[dict[str, Any]]] = {
+        (mode, float(l2)): []
+        for mode in augmented_variants
+        for l2 in l2_values
+    }
+    for (mode, l2), output_rows in candidate_rows.items():
         for season in BACKTEST_SEASONS:
-            validation, probability = _predict_season(augmented_rows, season=season, l2=l2)
-            candidate_rows[l2].extend(
-                {"home_win": int(row["home_win"]), "probability": float(value)}
+            validation, probability = _predict_season(augmented_variants[mode], season=season, l2=l2)
+            output_rows.extend(
+                {"season": int(season), "home_win": int(row["home_win"]), "probability": float(value)}
                 for row, value in zip(validation, probability)
             )
     candidates: dict[str, Any] = {}
-    for l2, rows in candidate_rows.items():
-        candidates[f"starter_logistic:l2={l2:g}"] = {
+    for (mode, l2), rows in candidate_rows.items():
+        candidates[f"starter_logistic:{mode}:l2={l2:g}"] = {
+            "feature_mode": mode,
             "l2": l2,
             "evaluation": evaluate_prediction_set(
                 [row["home_win"] for row in rows],
                 [row["probability"] for row in rows],
             ),
+            "season_evaluations": {
+                str(season): evaluate_prediction_set(
+                    [row["home_win"] for row in rows if int(row["season"]) == season],
+                    [row["probability"] for row in rows if int(row["season"]) == season],
+                )
+                for season in BACKTEST_SEASONS
+            },
         }
     selected_key = min(
         candidates,
@@ -174,12 +298,14 @@ def evaluate_retrospective_starter_challenger(
         ),
     )
     selected_l2 = float(candidates[selected_key]["l2"])
+    selected_mode = str(candidates[selected_key]["feature_mode"])
+    selected_augmented_rows = augmented_variants[selected_mode]
 
     official_rows = generate_historical_audit_rows(base_rows, l2=0.01, seasons=(*BACKTEST_SEASONS, DEVELOPMENT_HOLDOUT_SEASON))
     official_by_game = {int(row["game_id"]): row for row in official_rows}
     prediction_rows: list[dict[str, Any]] = []
     for season in (*BACKTEST_SEASONS, DEVELOPMENT_HOLDOUT_SEASON):
-        validation, probability = _predict_season(augmented_rows, season=season, l2=selected_l2)
+        validation, probability = _predict_season(selected_augmented_rows, season=season, l2=selected_l2)
         for row, value in zip(validation, probability):
             official = official_by_game[int(row["game_id"])]
             prediction_rows.append(
@@ -244,7 +370,7 @@ def evaluate_retrospective_starter_challenger(
         )
         for index, metric in enumerate(("error_rate", "log_loss", "brier_score"))
     }
-    missing_rows = [row for row in augmented_rows if int(row["season"]) in {*BACKTEST_SEASONS, DEVELOPMENT_HOLDOUT_SEASON}]
+    missing_rows = [row for row in selected_augmented_rows if int(row["season"]) in {*BACKTEST_SEASONS, DEVELOPMENT_HOLDOUT_SEASON}]
     report = {
         "schema_version": "pitching-v2-retrospective-evaluation-v1",
         "provenance": {
@@ -258,6 +384,7 @@ def evaluate_retrospective_starter_challenger(
         "development_holdout_season": DEVELOPMENT_HOLDOUT_SEASON,
         "candidates": candidates,
         "selected_candidate": selected_key,
+        "selected_feature_mode": selected_mode,
         "season_results": season_results,
         "development_holdout": evaluations,
         "paired_date_block_bootstrap_vs_model_v1": paired,
@@ -295,10 +422,20 @@ def run_retrospective_pitching_backtest(
         target_seasons=target_seasons,
         refresh=refresh,
     )
-    augmented = add_prior_season_starter_features(rows, stats)
+    game_logs, game_log_sources = collect_current_season_pitching_game_logs(
+        client=client,
+        rows=rows,
+        target_seasons=target_seasons,
+        refresh=refresh,
+    )
+    sources.extend(game_log_sources)
+    augmented_variants = {
+        "prior_season": add_prior_season_starter_features(rows, stats),
+        "prior_plus_current": add_rolling_starter_features(rows, stats, game_logs),
+    }
     report, predictions = evaluate_retrospective_starter_challenger(
         rows,
-        augmented,
+        augmented_variants,
         l2_values=l2_values,
         bootstrap_iterations=bootstrap_iterations,
         seed=seed,
